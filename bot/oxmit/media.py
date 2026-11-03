@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -87,6 +88,10 @@ async def copy_with_progress(src: str | Path, dst: str | Path,
                 done += len(block)
                 if on_progress:
                     on_progress(done)
+            # Flush to disk before declaring the copy complete: a crash right
+            # after staging must not leave an os.replace'd-but-unflushed file.
+            fout.flush()
+            os.fsync(fout.fileno())
     return await asyncio.to_thread(_run)
 
 

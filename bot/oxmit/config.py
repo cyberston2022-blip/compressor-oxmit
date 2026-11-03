@@ -1,9 +1,16 @@
-"""Environment-driven settings. All secrets come from the server-side .env file."""
+"""Environment-driven settings. All secrets come from the server-side .env file.
+
+Fail-fast: malformed numeric values are collected into _PARSE_ERRORS and
+load_settings() refuses to boot on an invalid configuration (F16) instead of
+silently running on defaults.
+"""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+
+_PARSE_ERRORS: list[str] = []
 
 
 def _bool(name: str, default: bool = False) -> bool:
@@ -14,16 +21,24 @@ def _bool(name: str, default: bool = False) -> bool:
 
 
 def _int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
     try:
-        return int(os.getenv(name, "").strip() or default)
-    except (TypeError, ValueError):
+        return int(raw)
+    except ValueError:
+        _PARSE_ERRORS.append(f"{name}: expected integer, got {raw!r}")
         return default
 
 
 def _float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
     try:
-        return float(os.getenv(name, "").strip() or default)
-    except (TypeError, ValueError):
+        return float(raw)
+    except ValueError:
+        _PARSE_ERRORS.append(f"{name}: expected number, got {raw!r}")
         return default
 
 
@@ -35,7 +50,7 @@ def _csv_ids(name: str) -> list[int]:
             try:
                 out.append(int(part))
             except ValueError:
-                continue
+                _PARSE_ERRORS.append(f"{name}: skipped invalid id {part!r}")
     return out
 
 
@@ -64,8 +79,10 @@ class Settings:
     max_queued: int = 50
     disk_min_free_bytes: int = 40 * 1024**3
     disk_pause_free_bytes: int = 20 * 1024**3
+    admission_floor_bytes: int = 5 * 1024**3
     job_retries: int = 2
     stuck_minutes: int = 90
+    tuner_active_window_s: int = 180
     tmp_retention_hours: int = 24
     worker_replicas: int = 2
     worker_cpu_single: float = 7.0
@@ -99,6 +116,7 @@ class Settings:
     internal_test_token: str = ""
     internal_panel_token: str = ""
     enable_test_api: bool = False
+    enable_test_api_requested: bool = False
     redis_url: str = "redis://redis:6379"
     owner_telegram_id: int = 0
     panel_public_url: str = ""
@@ -124,6 +142,62 @@ class Settings:
             },
         }
 
+    def validate(self) -> list[str]:
+        """Return a list of configuration problems (empty = OK). load_settings()
+        refuses to boot on a non-empty list unless OXMIT_SKIP_VALIDATION=1."""
+        errs = list(_PARSE_ERRORS)
+        if "REPLACE_ME" in self.bot_token or self.bot_token.startswith("123456789:"):
+            errs.append("BOT_TOKEN still contains the placeholder — set a real token")
+        if not self.pg_dsn:
+            errs.append("PG_DSN is required (PostgreSQL connection string)")
+        if not self.internal_secret:
+            errs.append("INTERNAL_SECRET is required (random string, internal API auth)")
+        if self.enable_test_api_requested and not self.enable_test_api:
+            errs.append("ENABLE_TEST_API=true is ignored because ENABLE_TEST_API_CONFIRM "
+                        "is not set to I-UNDERSTAND-THIS-IS-PROD — set it or remove "
+                        "ENABLE_TEST_API")
+        if not 1 <= self.worker_replicas <= 16:
+            errs.append(f"WORKER_REPLICAS={self.worker_replicas} outside 1..16")
+        if len(self.worker_container_names) != self.worker_replicas:
+            errs.append(
+                f"WORKER_CONTAINER_NAMES has {len(self.worker_container_names)} entries "
+                f"but WORKER_REPLICAS={self.worker_replicas} — the CPU tuner must match compose")
+        if self.disk_pause_free_bytes >= self.disk_min_free_bytes:
+            errs.append(
+                f"DISK_PAUSE_FREE_GB ({self.disk_pause_free_bytes // 1024**3}) must be "
+                f"smaller than DISK_MIN_FREE_GB ({self.disk_min_free_bytes // 1024**3}) "
+                "— otherwise the disk gate locks permanently (pause low < resume high)")
+        if self.admission_floor_bytes < 1024**3:
+            errs.append("ADMISSION_FLOOR_GB must be >= 1 GiB")
+        if not 30 <= self.tuner_active_window_s <= 3600:
+            errs.append(f"TUNER_ACTIVE_WINDOW_S={self.tuner_active_window_s} outside 30..3600")
+        if not 0.5 <= self.split_safety <= 1.0:
+            errs.append(f"SPLIT_SAFETY={self.split_safety} outside 0.5..1.0")
+        if not 0.5 <= self.no_gain_threshold <= 1.2:
+            errs.append(f"NO_GAIN_THRESHOLD={self.no_gain_threshold} outside 0.5..1.2")
+        if not (self.worker_cpu_min <= self.worker_cpu_multi <= self.worker_cpu_single):
+            errs.append(
+                f"worker CPU tiers must satisfy WORKER_CPU_MIN ({self.worker_cpu_min}) "
+                f"<= WORKER_CPU_MULTI ({self.worker_cpu_multi}) <= "
+                f"WORKER_CPU_SINGLE ({self.worker_cpu_single})")
+        if self.target_min_mb >= self.target_max_gb * 1024:
+            errs.append(
+                f"TARGET_MIN_MB ({self.target_min_mb}) must be smaller than "
+                f"TARGET_MAX_GB*1024 ({self.target_max_gb * 1024})")
+        for name, val in (("MAX_ACTIVE_PER_USER", self.max_active_per_user),
+                          ("MAX_JOBS_PER_HOUR_PER_USER", self.max_jobs_per_hour),
+                          ("MAX_JOBS_PER_DAY", self.max_jobs_per_day),
+                          ("MAX_QUEUED_JOBS", self.max_queued),
+                          ("MAX_CONCURRENT_UPLOADS", self.max_concurrent_uploads),
+                          ("STUCK_MINUTES", self.stuck_minutes)):
+            if val < 1:
+                errs.append(f"{name}={val} must be >= 1")
+        if self.job_retries < 0:
+            errs.append(f"JOB_RETRIES={self.job_retries} must be >= 0")
+        if self.segment_enabled and self.segment_length <= 0:
+            errs.append("SEGMENT_LENGTH must be > 0 when SEGMENT_ENABLED=true")
+        return errs
+
     @property
     def media_incoming(self) -> str:
         return os.path.join(self.media_root, "incoming")
@@ -146,13 +220,18 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    _PARSE_ERRORS.clear()  # repeated loads (tests/tools) must not see stale errors
     s = Settings()
     s.bot_token = os.getenv("BOT_TOKEN", "").strip()
     s.api_id = _int("TELEGRAM_API_ID", 0)
     s.api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
     s.admin_ids = _csv_ids("ADMIN_TELEGRAM_IDS")
     ch = os.getenv("ARCHIVE_CHANNEL_ID", "").strip()
-    s.archive_channel_id = int(ch) if ch else None
+    if ch:
+        try:
+            s.archive_channel_id = int(ch)
+        except ValueError:
+            _PARSE_ERRORS.append(f"ARCHIVE_CHANNEL_ID: expected integer, got {ch!r}")
 
     s.local_bot_api_base = os.getenv("LOCAL_BOT_API_BASE", s.local_bot_api_base).rstrip("/")
     s.max_upload_bytes = _int("MAX_UPLOAD_MB", 2000) * 1024 * 1024
@@ -171,8 +250,10 @@ def load_settings() -> Settings:
     s.max_queued = _int("MAX_QUEUED_JOBS", 50)
     s.disk_min_free_bytes = _int("DISK_MIN_FREE_GB", 40) * 1024**3
     s.disk_pause_free_bytes = _int("DISK_PAUSE_FREE_GB", 20) * 1024**3
+    s.admission_floor_bytes = _int("ADMISSION_FLOOR_GB", 5) * 1024**3
     s.job_retries = _int("JOB_RETRIES", 2)
     s.stuck_minutes = _int("STUCK_MINUTES", 90)
+    s.tuner_active_window_s = _int("TUNER_ACTIVE_WINDOW_S", 180)
     s.tmp_retention_hours = _int("TMP_RETENTION_HOURS", 24)
     s.worker_replicas = _int("WORKER_REPLICAS", 2)
     s.worker_cpu_single = _float("WORKER_CPU_SINGLE", 7.0)
@@ -208,9 +289,17 @@ def load_settings() -> Settings:
     s.internal_secret = os.getenv("INTERNAL_SECRET", "")
     s.internal_test_token = os.getenv("INTERNAL_TEST_TOKEN", "")
     s.internal_panel_token = os.getenv("ADMIN_PANEL_TOKEN", "")
-    s.enable_test_api = _bool("ENABLE_TEST_API", False)
+    s.enable_test_api_requested = _bool("ENABLE_TEST_API", False)
+    # Double gate: ENABLE_TEST_API alone never enables the test routes — the
+    # operator must confirm with the explicit sentinel (SEC-4).
+    s.enable_test_api = s.enable_test_api_requested and (
+        os.getenv("ENABLE_TEST_API_CONFIRM", "").strip() == "I-UNDERSTAND-THIS-IS-PROD")
     s.redis_url = os.getenv("REDIS_URL", s.redis_url).rstrip("/")
     s.owner_telegram_id = _int("OWNER_TELEGRAM_ID", 0)
     s.panel_public_url = os.getenv("PANEL_PUBLIC_URL", "").strip().rstrip("/")
     s.owner_claim = _bool("OWNER_CLAIM", True)
+
+    errs = s.validate()
+    if os.getenv("OXMIT_SKIP_VALIDATION", "") != "1" and errs:
+        raise RuntimeError("Invalid configuration:\n- " + "\n- ".join(errs))
     return s

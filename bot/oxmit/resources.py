@@ -70,7 +70,6 @@ class WorkerCpuTuner:
         client = self._get_client()
         if client is None:
             return
-        nano = int(target * 1e9)
 
         def _apply() -> int:
             updated = 0

@@ -6,10 +6,11 @@ shows them as upcoming). Everything mutating is confirmed client-side,
 guarded server-side (session cookie + CSRF header) and recorded in
 audit_log. Error strings shown anywhere pass through media.redact().
 
-Auth model: ADMIN_PANEL_TOKEN -> POST /panel/login (rate-limited) -> signed
-session cookie (httpOnly) + CSRF cookie (readable by the panel JS, checked
-as X-CSRF header on every POST). Sessions live in memory and can be revoked.
-Binding stays 127.0.0.1:8090 — reach it through an SSH tunnel only.
+Auth model: ADMIN_PANEL_TOKEN -> POST /panel/login (rate-limited per IP, with
+a global all-IP lockout layer) OR a single-use one-time link minted by the
+bot (/panel/one_time) -> signed session cookie (httpOnly + Secure) + CSRF
+cookie (readable by the panel JS, checked as X-CSRF header on every POST,
+including POST /panel/logout). Sessions live in memory and can be revoked.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import asyncio
 import hashlib
 import hmac as hmac_mod
 import json
+import os
 import secrets
 import shutil
 import time
@@ -42,6 +44,23 @@ COOKIE_TTL_S = 12 * 3600
 LOGIN_WINDOW_S = 60
 LOGIN_MAX_ATTEMPTS = 5
 LOCKOUT_S = 300
+# per-IP lockout layer (F8): global failure threshold above the per-IP one
+GLOBAL_FAIL_WINDOW_S = 600
+GLOBAL_FAIL_MAX = 100
+GLOBAL_LOCKOUT_S = 900
+IP_MAP_MAX = 1000
+# one-time panel login links (F6)
+_ONE_TIME_TTL_S = 600
+_ONE_TIME_MAX_LIVE = 20
+# shown for invalid/expired/used links — never reveals which of the three
+_ONE_TIME_ERR_FA = "لینک نامعتبر یا منقضی — دوباره در ربات /panel بزنید"
+
+# Escape hatch for plain-HTTP local testing; browsers accept Secure cookies on
+# http://localhost. Remote plain-HTTP logins then fail silently (= force TLS).
+SECURE_COOKIES = os.getenv("PANEL_SECURE_COOKIES", "1") != "0"
+
+# sha256hex(k) -> {"exp": float, "minted_by": int} — the raw key is never stored
+_one_time: dict[str, dict] = {}
 
 _TREND_RANGES = {
     24: ("24 hours", "1 hour", 3600),
@@ -86,6 +105,48 @@ def login_allowed(attempts: deque, locked_until: float) -> tuple[bool, float]:
     return len(attempts) < LOGIN_MAX_ATTEMPTS, 0.0
 
 
+# pure helper (unit-tested): global (all-IP) lockout layer
+def global_lock_remaining(fails: deque, locked_until: float, now: float) -> float:
+    """Seconds the panel stays locked for everyone, 0.0 when open.
+
+    Triggered once GLOBAL_FAIL_MAX failures land inside GLOBAL_FAIL_WINDOW_S;
+    the caller persists the verdict into locked_until so it survives.
+    """
+    if locked_until > now:
+        return locked_until - now
+    while fails and now - fails[0] > GLOBAL_FAIL_WINDOW_S:
+        fails.popleft()
+    if len(fails) >= GLOBAL_FAIL_MAX:
+        return GLOBAL_LOCKOUT_S
+    return 0.0
+
+
+def mint_one_time_link(admin_tg_id: int, mint_history: dict[int, deque],
+                       base_url: str) -> str | None:
+    """Mint a single-use /panel/one_time link for an admin (F6).
+
+    Max 3 links per admin per _ONE_TIME_TTL_S window; at most _ONE_TIME_MAX_LIVE
+    unexpired links exist at any time (oldest evicted). Only the SHA-256 of the
+    key is stored server-side; the raw key lives solely in the link itself.
+    Returns None when the admin hit the mint rate limit.
+    """
+    now = time.time()
+    hist = mint_history.setdefault(admin_tg_id, deque())
+    while hist and now - hist[0] > _ONE_TIME_TTL_S:
+        hist.popleft()
+    if len(hist) >= 3:
+        return None
+    for h in [h for h, e in _one_time.items() if e["exp"] <= now]:
+        _one_time.pop(h, None)
+    while len(_one_time) >= _ONE_TIME_MAX_LIVE:
+        _one_time.pop(next(iter(_one_time)))  # evict oldest inserted
+    k = secrets.token_urlsafe(32)
+    _one_time[hashlib.sha256(k.encode()).hexdigest()] = {
+        "exp": now + _ONE_TIME_TTL_S, "minted_by": admin_tg_id}
+    hist.append(now)
+    return f"{base_url}/panel/one_time?k={k}"
+
+
 # ---------------------------------------------------------------------------
 # data builders
 # ---------------------------------------------------------------------------
@@ -122,10 +183,12 @@ async def summary_data(engine, db, cfg, state) -> dict:
         "'bytes_saved','bytes_in','bytes_out','dedup_exact_reuse','dedup_inflight_joined',"
         "'dedup_similarity_reuse','no_gain_events')")}
     data["counters"] = counters
-    t0 = time.time()
+    # get_me goes through the engine cache (SPEC-02): this route is polled
+    # every 4s per client, a live call each time hammered the Local Bot API.
     try:
-        await engine.bot.get_me()
-        data["tg_ms"] = int((time.time() - t0) * 1000)
+        await engine.get_me_cached()
+        cached_at = engine._me[1] if engine._me else None
+        data["tg_ms"] = int((time.time() - cached_at) * 1000) if cached_at else None
     except Exception:  # noqa: BLE001
         data["tg_ms"] = None
     return data
@@ -265,7 +328,7 @@ async def services_data(engine, db, cfg, state) -> dict:
         comps["encore"] = f"error: {str(exc)[:60]}"
         ok = False
     try:
-        me = await engine.bot.get_me()
+        me = await engine.get_me_cached()
         comps["bot_api"] = f"ok @{me.username}"
     except Exception as exc:  # noqa: BLE001
         comps["bot_api"] = f"error: {str(exc)[:60]}"
@@ -294,15 +357,41 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         psutil.cpu_percent(interval=None)  # prime the sampler
 
     sessions: dict[str, dict] = app.setdefault("panel_sessions", {})
-    login_attempts: deque = deque()
-    lock_state = {"until": 0.0}
+    attempts_by_ip: dict[str, dict] = {}   # ip -> {"attempts": deque, "locked_until": float}
+    global_fails: deque = deque()          # every failed login, all IPs
+    global_lock = {"until": 0.0}
+    one_time_hits: dict[str, deque] = {}   # ip -> deque of GET /panel/one_time times
 
     def _json(data, status: int = 200) -> web.Response:
         return web.json_response(data, status=status)
 
     def _ip(request: web.Request) -> str:
         peer = request.transport.get_extra_info("peername") if request.transport else None
-        return f"{peer[0]}:{peer[1]}" if peer else "?"
+        return peer[0] if peer else "?"
+
+    def _ip_bucket(ip: str) -> dict:
+        bucket = attempts_by_ip.get(ip)
+        if bucket is None:
+            if len(attempts_by_ip) >= IP_MAP_MAX:
+                attempts_by_ip.pop(next(iter(attempts_by_ip)), None)
+            bucket = {"attempts": deque(), "locked_until": 0.0}
+            attempts_by_ip[ip] = bucket
+        return bucket
+
+    def _one_time_allowed(ip: str) -> bool:
+        """Inline per-IP limiter for GET /panel/one_time: 15 hits / minute."""
+        now = time.time()
+        hits = one_time_hits.get(ip)
+        if hits is None:
+            if len(one_time_hits) >= IP_MAP_MAX:
+                one_time_hits.pop(next(iter(one_time_hits)), None)
+            hits = one_time_hits[ip] = deque()
+        while hits and now - hits[0] > LOGIN_WINDOW_S:
+            hits.popleft()
+        if len(hits) >= 15:
+            return False
+        hits.append(now)
+        return True
 
     def _session(request: web.Request) -> dict | None:
         return _check_cookie(token, request.cookies.get(COOKIE, ""), sessions)
@@ -324,7 +413,13 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
                             charset="utf-8")
 
     async def login(request: web.Request) -> web.Response:
-        allowed, retry_after = login_allowed(login_attempts, lock_state["until"])
+        ip = _ip(request)
+        glob_rem = global_lock_remaining(global_fails, global_lock["until"], time.time())
+        if glob_rem > 0:
+            global_lock["until"] = time.time() + glob_rem
+            return _json({"error": "locked", "retry_after": round(glob_rem)}, 429)
+        bucket = _ip_bucket(ip)
+        allowed, retry_after = login_allowed(bucket["attempts"], bucket["locked_until"])
         if not allowed:
             return _json({"error": "locked", "retry_after": round(retry_after)}, 429)
         try:
@@ -333,36 +428,76 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             return _json({"error": "bad json"}, 400)
         supplied = str(body.get("token") or "")
         if not hmac_mod.compare_digest(supplied.encode(), token.encode()):
-            login_attempts.append(time.time())
-            if len(login_attempts) >= LOGIN_MAX_ATTEMPTS:
-                lock_state["until"] = time.time() + LOCKOUT_S
-                login_attempts.clear()
+            now = time.time()
+            bucket["attempts"].append(now)
+            if len(bucket["attempts"]) >= LOGIN_MAX_ATTEMPTS:
+                bucket["locked_until"] = now + LOCKOUT_S
+                bucket["attempts"].clear()
+            global_fails.append(now)
+            rem = global_lock_remaining(global_fails, global_lock["until"], now)
+            if rem > 0:
+                global_lock["until"] = now + rem
             await asyncio.sleep(1.0)
             return _json({"error": "unauthorized"}, 401)
-        login_attempts.clear()
+        bucket["attempts"].clear()
+        bucket["locked_until"] = 0.0
         sid = secrets.token_urlsafe(24)
         csrf = secrets.token_urlsafe(24)
         exp = int(time.time()) + COOKIE_TTL_S
         sessions[sid] = {"exp": exp, "csrf": csrf, "actor": "panel-admin",
-                         "ip": _ip(request), "created": int(time.time())}
+                         "ip": ip, "created": int(time.time())}
         resp = _json({"ok": True})
         resp.set_cookie(COOKIE, f"{sid}:{exp}:{_sign(token, f'{sid}:{exp}')}",
-                        max_age=COOKIE_TTL_S, httponly=True, samesite="Strict")
+                        max_age=COOKIE_TTL_S, httponly=True, samesite="Strict",
+                        secure=SECURE_COOKIES)
         resp.set_cookie(CSRF_COOKIE, csrf, max_age=COOKIE_TTL_S,
-                        httponly=False, samesite="Strict")
+                        httponly=False, samesite="Strict", secure=SECURE_COOKIES)
         await audit_mod.log_action(db, sessions[sid]["actor"], "admin",
                                    "panel.login", target=None,
                                    details="web panel login", source="web",
                                    ip=sessions[sid]["ip"])
         return resp
 
+    async def one_time_login(request: web.Request) -> web.Response:
+        ip = _ip(request)
+        if not _one_time_allowed(ip):
+            return _json({"error": "locked", "retry_after": LOGIN_WINDOW_S}, 429)
+        k = request.query.get("k", "")
+        h = hashlib.sha256(k.encode()).hexdigest()
+        entry = _one_time.pop(h, None)  # pop BEFORE validation: single-use, unconditional
+        if not k or entry is None or entry["exp"] < time.time():
+            await audit_mod.log_action(db, "panel-one-time", "admin",
+                                       "panel.one_time.rejected", None, None,
+                                       source="web", ip=ip)
+            return web.Response(text=_login_page_html(_ONE_TIME_ERR_FA),
+                                content_type="text/html", charset="utf-8", status=401)
+        sid = secrets.token_urlsafe(24)
+        csrf = secrets.token_urlsafe(24)
+        exp = int(time.time()) + COOKIE_TTL_S
+        sessions[sid] = {"exp": exp, "csrf": csrf, "actor": "panel-admin",
+                         "ip": ip, "created": int(time.time())}
+        await audit_mod.log_action(db, sessions[sid]["actor"], "admin",
+                                   "panel.login", target=None,
+                                   details="one-time link", source="web", ip=ip)
+        await audit_mod.log_action(db, sessions[sid]["actor"], "admin",
+                                   "panel.one_time.used", entry["minted_by"],
+                                   None, source="web", ip=ip)
+        resp = web.Response(status=303, headers={"Location": "/panel"})
+        resp.set_cookie(COOKIE, f"{sid}:{exp}:{_sign(token, f'{sid}:{exp}')}",
+                        max_age=COOKIE_TTL_S, httponly=True, samesite="Strict",
+                        secure=SECURE_COOKIES)
+        resp.set_cookie(CSRF_COOKIE, csrf, max_age=COOKIE_TTL_S,
+                        httponly=False, samesite="Strict", secure=SECURE_COOKIES)
+        return resp
+
     async def logout(request: web.Request) -> web.Response:
-        session = _session(request)
-        if session:
-            for sid, s in list(sessions.items()):
-                if s is session:
-                    sessions.pop(sid, None)
-        resp = web.Response(status=302, headers={"Location": "/panel"})
+        session = _post_session(request)
+        if session is None:
+            return _json({"error": "unauthorized"}, 401)
+        for sid, s in list(sessions.items()):
+            if s is session:
+                sessions.pop(sid, None)
+        resp = _json({"ok": True})
         resp.del_cookie(COOKIE)
         resp.del_cookie(CSRF_COOKIE)
         return resp
@@ -656,7 +791,8 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
 
     app.router.add_get("/panel", page)
     app.router.add_post("/panel/login", login)
-    app.router.add_get("/panel/logout", logout)
+    app.router.add_get("/panel/one_time", one_time_login)
+    app.router.add_post("/panel/logout", logout)
     app.router.add_get("/panel/api/summary", summary)
     app.router.add_get("/panel/api/trend", trend)
     app.router.add_get("/panel/api/active", active)
@@ -703,6 +839,14 @@ if(r.ok){location.reload()}
 else if(r.status===429){const j=await r.json();e.textContent='قفل موقت — '+Math.ceil(j.retry_after||60)+' ثانیه دیگر تلاش کنید'}
 else{e.textContent='توکن اشتباه است'}}catch(x){e.textContent='خطای ارتباط'}}</script>
 </body></html>"""
+
+
+def _login_page_html(error: str = "") -> str:
+    """Login page, optionally pre-filled with a static server-side error."""
+    if error:
+        return _LOGIN_PAGE.replace('<div class="err" id="e"></div>',
+                                   '<div class="err" id="e">' + error + '</div>')
+    return _LOGIN_PAGE
 
 _DASHBOARD_PAGE = """<!doctype html><html dir="rtl" lang="fa"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -831,7 +975,7 @@ textarea{width:100%;min-height:90px;border:1px solid var(--line);border-radius:1
     <div style="display:flex;align-items:center;gap:8px;padding:6px 10px">
       <div style="width:30px;height:30px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-weight:800;display:flex;align-items:center;justify-content:center;font-size:13px">A</div>
       <small style="color:var(--mut);font-size:10.5px">نشست ادمین</small>
-      <button class="btn ghost xs" style="margin-inline-start:auto" onclick="location.href='/panel/logout'" title="خروج">⎋</button>
+      <button class="btn ghost xs" style="margin-inline-start:auto" onclick="doLogout()" title="خروج">⎋</button>
     </div>
   </div>
 </aside>
@@ -953,6 +1097,7 @@ const j=await r.json().catch(()=>({}));
 if(!r.ok)throw(j.error||('HTTP '+r.status));return j}
 async function post(p,body){return api(p,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF':csrf()},
 body:JSON.stringify(body||{})})}
+async function doLogout(){try{await post('/panel/logout')}catch(e){} location.href='/panel'}
 function toast(msg,err){const t=document.createElement('div');t.className='toast'+(err?' err':'');
 t.textContent=msg;document.body.appendChild(t);setTimeout(()=>t.remove(),3600)}
 function confirmModal(title,text,okLabel){return new Promise(res=>{
@@ -1010,7 +1155,8 @@ esc(actionLabel(e.action))+(e.target?' — <b class="mono">'+esc(String(e.target
 function actionLabel(a){return{ 'job.cancel':'🚫 لغو جاب','job.retry':'↩️ تلاش مجدد','job.redeliver':'📤 تحویل مجدد',
 'user.ban':'🚫 بن کاربر','user.vip':'💎 تغییر VIP','user.limits':'🎚 تغییر محدودیت','user.message':'✉️ پیام به کاربر',
 'panel.login':'🔑 ورود به پنل','intake.pause':'⏸ توقف پذیرش','intake.resume':'▶️ ادامه پذیرش',
-'system.cleanup':'🧹 پاک‌سازی','system.reconcile':'📊 بازتراز شمارنده‌ها','panel.session_revoke':'🔒 ابطال نشست'}[a]||a}
+'system.cleanup':'🧹 پاک‌سازی','system.reconcile':'📊 بازتراز شمارنده‌ها','panel.session_revoke':'🔒 ابطال نشست',
+'admin.thumb_set':'🖼 تامبنیل تنظیم شد','admin.thumb_delete':'🖼 تامبنیل حذف شد'}[a]||a}
 function drawTrend(d){const pts=d.points,W=900,H=170,P={t:14,b:26,l:14,r:14};
 const maxV=Math.max(1,...pts.map(p=>Math.max(p.ok,p.bad)));
 const n=pts.length,iw=W-P.l-P.r,ih=H-P.t-P.b;

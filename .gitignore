@@ -1,0 +1,45 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual envs ---
+.venv*/
+venv*/
+
+# --- Secrets / env ---
+.env
+.env.*
+!.env.example
+
+# --- Runtime data ---
+media/
+backups/
+*.log
+logs/
+
+# --- Telegram session / bot api data ---
+*.session
+*.session-journal
+
+# --- Test / tooling caches ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- TLS / certs ---
+deploy/certs/
+*.pem
+*.crt
+*.key
+
+# --- Local tooling ---
+.zcode/
+.idea/
+.vscode/

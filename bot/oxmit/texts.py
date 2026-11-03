@@ -54,6 +54,7 @@ T: dict[str, dict[str, str]] = {
     "choose_profile_for": {"fa": "پروفایل را برای این فایل انتخاب کنید:", "en": "Pick a profile for this file:"},
     "menu_stats": {"fa": "آمار من", "en": "My stats"},
     "nothing_to_cancel": {"fa": "کار فعالی برای لغو نیست.", "en": "Nothing to cancel."},
+    "cancelling": {"fa": "⏳ در حال لغو…", "en": "⏳ Cancelling…"},
     "cancelled": {"fa": "🚫 کار {job} لغو شد.", "en": "🚫 Job {job} cancelled."},
     "stage_copying": {"fa": "آماده‌سازی فایل", "en": "Preparing file"},
     "stage_queued": {"fa": "در صف", "en": "Queued"},
@@ -191,6 +192,15 @@ T: dict[str, dict[str, str]] = {
         "fa": "⚠️ رکورد آرشیو {archive} دیگر در دسترس نیست.",
         "en": "⚠️ Archive record {archive} is no longer available.",
     },
+    "archive_proposal": {
+        "fa": "📌 کانال «{channel}» به‌عنوان کانال آرشیو شناسایی شد.\nبا تأیید، همهٔ خروجی‌ها در آن ذخیره می‌شوند.",
+        "en": "📌 Channel \"{channel}\" was detected as a candidate archive channel.\nOnce confirmed, all results are stored there.",
+    },
+    "btn_confirm_archive": {"fa": "✅ تأیید آرشیو", "en": "✅ Confirm archive"},
+    "archive_fwd_detected": {
+        "fa": "این پیام از کانال «{channel}» فوروارد شده است.",
+        "en": "This message was forwarded from the channel \"{channel}\".",
+    },
     "archive_blocked_admin": {
         "fa": "🚫 آرشیو مسدود شد: کار {job} — {out}. فایل تا {hours} ساعت روی سرور می‌ماند.",
         "en": "🚫 Archive blocked: job {job} — {out}. The file stays on the server for {hours}h.",
@@ -217,6 +227,23 @@ T: dict[str, dict[str, str]] = {
     "admin_broadcast_done": {
         "fa": "📢 ارسال شد به {ok} کاربر؛ {fail} ناموفق.",
         "en": "📢 Delivered to {ok} users; {fail} failed.",
+    },
+    "bcast_started": {
+        "fa": "📢 ارسال در پس‌زمینه شروع شد؛ با دکمهٔ ⏹ قابل توقف است.",
+        "en": "📢 Broadcast started in the background; stop it with ⏹.",
+    },
+    "bcast_progress": {
+        "fa": "📢 پیشرفت اطلاع‌رسانی: {done}/{total} — موفق {ok} | ناموفق {fail}",
+        "en": "📢 Broadcast progress: {done}/{total} — ok {ok} | failed {fail}",
+    },
+    "bcast_done": {
+        "fa": "📢 اطلاع‌رسانی تمام شد: {ok} موفق | {fail} ناموفق | {skipped} رد شده",
+        "en": "📢 Broadcast finished: {ok} delivered | {fail} failed | {skipped} skipped",
+    },
+    "bcast_stop_btn": {"fa": "⏹ توقف", "en": "⏹ Stop"},
+    "bcast_already_running": {
+        "fa": "📢 یک اطلاع‌رسانی دیگر در حال اجراست؛ اول همان را تمام یا متوقف کنید.",
+        "en": "📢 Another broadcast is already running; finish or stop it first.",
     },
     "admin_thumb_btn": {"fa": "تامبنیل گلوبال", "en": "Global thumbnail"},
     "admin_thumb_prompt": {

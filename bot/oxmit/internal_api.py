@@ -65,9 +65,8 @@ def build_app(engine, db, cfg, state, redis_client=None) -> web.Application:
         except Exception as exc:  # noqa: BLE001
             components["encore"] = f"error: {str(exc)[:80]}"
         try:
-            me = await engine.bot.get_me()
+            me = await engine.get_me_cached()
             components["bot_api"] = f"ok @{me.username}"
-            state.bot_username = me.username or ""
         except Exception as exc:  # noqa: BLE001
             components["bot_api"] = f"error: {str(exc)[:80]}"
         if redis_client is not None:
@@ -107,7 +106,12 @@ def build_app(engine, db, cfg, state, redis_client=None) -> web.Application:
             payload = await request.json()
         except (json.JSONDecodeError, UnicodeDecodeError):
             return _json({"error": "bad json"}, status=400)
-        progress = int(payload.get("progress") or 0)
+        # Encore sends fractional progress ("37.5"); a bare int() would 500 the
+        # callback route (SPEC-01).
+        try:
+            progress = int(float(payload.get("progress") or 0))
+        except (TypeError, ValueError):
+            progress = 0
         await db.execute(
             "UPDATE jobs SET progress = GREATEST(progress, $2), "
             "progress_changed_at = CASE WHEN progress < $2 THEN now() "
@@ -249,7 +253,11 @@ def build_app(engine, db, cfg, state, redis_client=None) -> web.Application:
         app.router.add_get("/internal/test/job/{job_id}", test_job)
         app.router.add_post("/internal/test/redeliver", test_redeliver)
     else:
-        log.info("test API disabled (set ENABLE_TEST_API=true to enable)")
+        if cfg.enable_test_api_requested:
+            log.warning("ENABLE_TEST_API=true ignored: ENABLE_TEST_API_CONFIRM is not "
+                        "set — test routes NOT registered")
+        else:
+            log.info("test API disabled (set ENABLE_TEST_API=true to enable)")
     app.router.add_get("/internal/stats", stats)
     return app
 

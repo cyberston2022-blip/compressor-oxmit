@@ -50,9 +50,15 @@ async def poller_loop(engine: JobEngine, cpu_tuner: WorkerCpuTuner, cfg) -> None
         try:
             await engine.poll_once()
             # Only jobs actually running on a worker consume CPU; the rest sit
-            # in Encore's queue (status 'processing' covers both).
+            # in Encore's queue. Jobs are marked 'processing' at submission, so
+            # count only ones with live progress inside the activity window
+            # (F17): progress_changed_at is refreshed on real progress only.
+            window = int(getattr(cfg, "tuner_active_window_s", 180))
             processing = int(await engine.db.fetchval(
-                "SELECT count(*) FROM jobs WHERE status = 'processing'") or 0)
+                "SELECT count(*) FROM jobs WHERE status = 'processing' "
+                "AND progress < 100 "
+                "AND progress_changed_at > now() - ($1 * interval '1 second')",
+                window) or 0)
             await cpu_tuner.tune(min(processing, cfg.worker_replicas))
         except Exception:  # noqa: BLE001
             log.exception("poll_once failed")
@@ -134,14 +140,12 @@ async def main() -> None:
     dp.include_router(admin.build_router(engine, db, cfg, state))
     dp.include_router(intake_router)
 
+    await engine.recover_on_startup()
     try:
         await engine.refresh_admin_commands()
         log.info("bot commands registered (default + admin scopes)")
     except Exception:  # noqa: BLE001
         log.exception("set_my_commands failed")
-
-    await engine.recover_on_startup()
-    await engine.refresh_admin_commands()
     # Strong references: unreferenced tasks are garbage-collection candidates.
     cpu_tuner = WorkerCpuTuner(cfg)
     background = [

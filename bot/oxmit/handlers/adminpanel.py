@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -49,6 +49,10 @@ _LIMIT_SET_SQL = {
     "max_duration_min": "UPDATE users SET max_duration_min = $2 WHERE tg_id = $1",
     "daily_quota_gb": "UPDATE users SET daily_quota_gb = $2 WHERE tg_id = $1",
 }
+
+# admin tg id -> stop flag for a running broadcast (SPEC-04); the send loop
+# checks it every recipient so a flood-wait sleep stays interruptible.
+bcast_stop: dict[int, asyncio.Event] = {}
 
 
 def build_router(engine, db, cfg, state) -> Router:
@@ -261,7 +265,8 @@ def build_router(engine, db, cfg, state) -> Router:
 
     @router.callback_query(F.data == "noop")
     async def on_noop(callback: CallbackQuery):
-        await callback.answer()
+        # idempotent label button (UX-08): let Telegram cache the answer
+        await callback.answer(cache_time=2)
 
     @router.callback_query(F.data == "pcx")
     async def on_pending_cancel(callback: CallbackQuery):
@@ -269,7 +274,8 @@ def build_router(engine, db, cfg, state) -> Router:
             return
         pending_mode.pop(callback.from_user.id, None)
         pending_target.pop(callback.from_user.id, None)
-        await callback.answer(tr("pending_cancelled", "fa"), show_alert=True)
+        await callback.answer(tr("pending_cancelled", "fa"), show_alert=True,
+                              cache_time=1)
 
     @router.callback_query(F.data.startswith("adm:"))
     async def on_admin_action(callback: CallbackQuery):
@@ -337,6 +343,9 @@ def build_router(engine, db, cfg, state) -> Router:
         elif action == "pause":
             state.paused = not state.paused
             await db.set_config("paused", state.paused)
+            await audit_mod.log_action(db, "admin:" + str(callback.from_user.id), "admin",
+                                       "intake.pause" if state.paused else "intake.resume",
+                                       None, None, source="telegram")
             await callback.message.answer(
                 tr("admin_paused" if state.paused else "admin_resumed", "fa")
             )
@@ -370,6 +379,10 @@ def build_router(engine, db, cfg, state) -> Router:
 
         elif action == "cleanup":
             await engine.cleanup_sweep()
+            await audit_mod.log_action(db, "admin:" + str(callback.from_user.id), "admin",
+                                       "system.cleanup", None,
+                                       human_size(engine._disk_free()),
+                                       source="telegram")
             await callback.message.answer(
                 f"🧹 پاک‌سازی شد؛ دیسک آزاد: {human_size(engine._disk_free())}"
             )
@@ -710,41 +723,111 @@ def build_router(engine, db, cfg, state) -> Router:
             tr("msg_prompt", "fa", uid=uid), reply_markup=_cancel_kb())
 
     # ------------------------------------------------------------------
-    # broadcast - preview + confirm (no accidental sends)
+    # broadcast - preview + confirm, then a background run with live
+    # progress, FloodWait handling and a stop button (SPEC-04)
     # ------------------------------------------------------------------
+    async def _broadcast_run(admin_id: int, text: str) -> None:
+        stop = bcast_stop.setdefault(admin_id, asyncio.Event())
+        users = await db.fetch(
+            "SELECT tg_id FROM users WHERE is_blocked = FALSE AND notify_done = TRUE"
+        )
+        total = len(users)
+        try:
+            progress = await engine.bot.send_message(
+                admin_id,
+                tr("bcast_progress", "fa", done=0, total=total, ok=0, fail=0),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text=tr("bcast_stop_btn", "fa"),
+                                         callback_data="bstop"),
+                ]]),
+            )
+        except TelegramAPIError as exc:
+            log.warning("broadcast progress message failed",
+                        extra={"detail": str(exc)[:120]})
+            bcast_stop.pop(admin_id, None)
+            return
+        progress_msg = progress.message_id
+        ok = fail = 0
+        for i, u in enumerate(users):
+            if stop.is_set():
+                break
+            try:
+                await engine.bot.send_message(u["tg_id"], text)
+                ok += 1
+            except TelegramRetryAfter as exc:
+                # Flood control: co-operatively wait (checking the stop flag
+                # every second), then retry the recipient exactly once.
+                for _ in range(int(exc.retry_after) + 1):
+                    if stop.is_set():
+                        break
+                    await asyncio.sleep(1)
+                if stop.is_set():
+                    break
+                try:
+                    await engine.bot.send_message(u["tg_id"], text)
+                    ok += 1
+                except TelegramAPIError:
+                    fail += 1
+            except TelegramAPIError:
+                fail += 1
+            if (i + 1) % 20 == 0 and not stop.is_set():
+                try:
+                    await engine.bot.edit_message_text(
+                        chat_id=admin_id, message_id=progress_msg,
+                        text=tr("bcast_progress", "fa", done=i + 1, total=total,
+                                ok=ok, fail=fail),
+                    )
+                except TelegramAPIError:
+                    pass
+                await asyncio.sleep(1)  # rate-limited batches
+        stopped = stop.is_set()
+        bcast_stop.pop(admin_id, None)
+        skipped = max(0, total - ok - fail)
+        try:
+            await engine.bot.edit_message_text(
+                chat_id=admin_id, message_id=progress_msg,
+                text=tr("bcast_done", "fa", ok=ok, fail=fail, skipped=skipped),
+            )
+        except TelegramAPIError:
+            pass
+        await audit_mod.log_action(db, "admin:" + str(admin_id), "admin",
+                                   "broadcast", f"recipients={total}",
+                                   f"ok={ok} fail={fail} skipped={skipped} "
+                                   f"stopped={stopped} text={text[:60]!r}",
+                                   source="telegram")
+
     @router.callback_query(F.data == "bgo")
     async def on_broadcast_go(callback: CallbackQuery):
         if not await _guard(callback):
             return
-        await callback.answer()
         text = bcast_text.pop(callback.from_user.id, None)
         if text is None:
+            await callback.answer()
             return
-        users = await db.fetch(
-            "SELECT tg_id FROM users WHERE is_blocked = FALSE AND notify_done = TRUE"
-        )
-        ok = fail = 0
-        for i, u in enumerate(users):
-            try:
-                await engine.bot.send_message(u["tg_id"], text)
-                ok += 1
-            except Exception:  # noqa: BLE001
-                fail += 1
-            if (i + 1) % 20 == 0:
-                await asyncio.sleep(1)  # rate-limited batches
-        await audit_mod.log_action(db, "admin:" + str(callback.from_user.id), "admin",
-                                   "broadcast", f"recipients={len(users)}",
-                                   f"ok={ok} fail={fail} text={text[:60]!r}",
-                                   source="telegram")
-        await callback.message.answer(
-            tr("admin_broadcast_done", "fa", ok=ok, fail=fail))
+        running = bcast_stop.get(callback.from_user.id)
+        if running is not None:
+            await callback.answer(tr("bcast_already_running", "fa"),
+                                  show_alert=True)
+            return
+        await callback.answer(tr("bcast_started", "fa"))
+        engine.spawn(_broadcast_run(callback.from_user.id, text))
+
+    @router.callback_query(F.data == "bstop")
+    async def on_broadcast_stop(callback: CallbackQuery):
+        if not await _guard(callback):
+            return
+        stop = bcast_stop.get(callback.from_user.id)
+        if stop is not None:
+            stop.set()
+        await callback.answer(tr("cancelling", "fa"))
 
     @router.callback_query(F.data == "bno")
     async def on_broadcast_no(callback: CallbackQuery):
         if not await _guard(callback):
             return
         bcast_text.pop(callback.from_user.id, None)
-        await callback.answer(tr("pending_cancelled", "fa"), show_alert=True)
+        await callback.answer(tr("pending_cancelled", "fa"), show_alert=True,
+                              cache_time=1)
 
     # ------------------------------------------------------------------
     # thumbnail delete button
@@ -756,6 +839,9 @@ def build_router(engine, db, cfg, state) -> Router:
         await callback.answer()
         state.global_thumb = None
         await db.set_config("global_thumb_path", None)
+        await audit_mod.log_action(db, "admin:" + str(callback.from_user.id), "admin",
+                                   "admin.thumb_delete", None, None,
+                                   source="telegram")
         pending_mode.pop(callback.from_user.id, None)
         try:
             await callback.message.edit_text(tr("admin_thumb_cleared", "fa"))
@@ -766,7 +852,7 @@ def build_router(engine, db, cfg, state) -> Router:
     async def on_monitor_stop(callback: CallbackQuery):
         if not await _guard(callback):
             return
-        await callback.answer()
+        await callback.answer(cache_time=1)
         task = live_tasks.pop(callback.from_user.id, None)
         if task:
             task.cancel()
@@ -850,6 +936,9 @@ def build_router(engine, db, cfg, state) -> Router:
             return
         state.global_thumb = str(dst)
         await db.set_config("global_thumb_path", str(dst))
+        await audit_mod.log_action(db, "admin:" + str(message.from_user.id), "admin",
+                                   "admin.thumb_set", None, str(dst),
+                                   source="telegram")
         await message.answer(tr("admin_thumb_saved", "fa"))
 
     @router.message(F.text, _has_pending("fsub"))

@@ -1,10 +1,13 @@
 """Start command: greeting + first-run admin bootstrap + force-sub gate."""
 from __future__ import annotations
 
+from collections import deque
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
 from .. import forcesub
+from .. import webpanel
 from ..log import get_logger
 from ..texts import tr
 from .common import ensure_user, is_admin
@@ -14,6 +17,7 @@ log = get_logger("oxmit.menu")
 
 def build_router(engine, db, cfg, state) -> Router:
     router = Router(name="menu")
+    mint_history: dict[int, deque] = {}  # admin tg id -> one-time link mint times
 
     @router.message(F.text.startswith("/start"))
     async def on_start(message: Message):
@@ -55,11 +59,19 @@ def build_router(engine, db, cfg, state) -> Router:
                 "🌐 پنل وب هنوز تنظیم نشده — PANEL_PUBLIC_URL و ADMIN_PANEL_TOKEN "
                 "باید در .env سرور ست شده باشند.")
             return
+        base = url.rstrip("/")
+        if base.endswith("/panel"):
+            base = base[: -len("/panel")]
+        link = webpanel.mint_one_time_link(message.from_user.id, mint_history, base)
+        if link is None:
+            await message.answer(
+                "⏳ زیادتر از حد لینک ساختی — ۱۰ دقیقه دیگر دوباره /panel بزنید.")
+            return
         await message.answer(
-            "🌐 پنل مدیریت وب:\n" + url +
-            "\n\n🔐 توکن ورود:\n<code>" + token + "</code>" +
-            "\n\n⚠️ این توکن دسترسی کامل ادمین می‌دهد — در گروه/کانال فورواردش نکنید.")
-        log.info("panel token shared", extra={"user_id": message.from_user.id})
+            "🔗 ورود یک‌بارمصرف به پنل مدیریت (۱۰ دقیقه اعتبار دارد):\n" + link +
+            "\n\n⚠️ لینک فقط یک‌بار کار می‌کند — آن را در گروه/کانال فوروارد نکنید."
+            "\nاگر لینک منقضی شد دوباره /panel بزنید یا توکن را در فرم وارد کن.")
+        log.info("one-time panel link minted", extra={"user_id": message.from_user.id})
 
     @router.callback_query(F.data == "fsub:check")
     async def on_fsub_check(callback: CallbackQuery):

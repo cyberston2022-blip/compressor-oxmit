@@ -35,6 +35,22 @@ VIDEO_DOCS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".flv",
 
 _PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
 
+# per-user callback throttle (UX-01/02): a 0.6s gap kills double-tap storms
+# that re-ran DB lookups / re-sent multi-GB files (Argons plugins/query.py).
+_last_cb: dict[int, float] = {}
+
+
+def _throttled(callback: CallbackQuery) -> bool:
+    """True when the same user pressed a button within the last 0.6s."""
+    now = time.monotonic()
+    uid = callback.from_user.id
+    if now - _last_cb.get(uid, 0.0) < 0.6:
+        return True
+    if len(_last_cb) > 5000:
+        _last_cb.clear()
+    _last_cb[uid] = now
+    return False
+
 
 @dataclass
 class PendingPick:
@@ -159,7 +175,7 @@ def build_router(engine, db, cfg, state) -> Router:
                     _as_uuid(result["job_id"]),
                 )
                 if pos:
-                    queue_note = "\n📍 " + tr("queue_position", "fa", n=pos)
+                    queue_note = "\n📍 " + tr("queue_position", lang, n=pos)
             except Exception:  # noqa: BLE001 - informational only
                 queue_note = ""
         if outcome == "joined" and status:
@@ -318,8 +334,9 @@ def build_router(engine, db, cfg, state) -> Router:
         if callback.message is None:
             return
         pick = video_pending.get(callback.from_user.id)
+        lang = await engine._lang(callback.from_user.id)
         if pick is None:
-            await callback.answer(tr("cancel_expired", "fa"), show_alert=True)
+            await callback.answer(tr("cancel_expired", lang), show_alert=True)
             return
         await callback.answer()
         percent_pending[callback.from_user.id] = pick
@@ -331,7 +348,29 @@ def build_router(engine, db, cfg, state) -> Router:
             )
         except TelegramAPIError:
             pass
-        await callback.message.answer(tr("level_prompt", "fa"))
+        await callback.message.answer(
+            tr("level_prompt", lang),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text=tr("btn_cancel", lang),
+                                     callback_data="cmp:stop"),
+            ]]),
+        )
+
+    # ---- cancel exit for the level / custom-size prompt (UX-05) ----
+    @router.callback_query(F.data == "cmp:stop")
+    async def on_compress_stop(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        lang = await engine._lang(callback.from_user.id)
+        percent_pending.pop(callback.from_user.id, None)
+        pending_custom.pop(callback.from_user.id, None)
+        await callback.answer(tr("pending_cancelled", lang))
+        if callback.message is not None:
+            try:
+                await callback.message.delete()
+            except TelegramAPIError:
+                pass
 
     def _waiting_percent(message: Message) -> bool:
         return message.from_user is not None and message.from_user.id in percent_pending
@@ -413,18 +452,26 @@ def build_router(engine, db, cfg, state) -> Router:
     # ---- failure recovery buttons ----
     @router.callback_query(F.data.startswith("rtry:"))
     async def on_retry(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
         await callback.answer()
         job_id = callback.data.split(":", 1)[1]
+        lang = await engine._lang(callback.from_user.id)
         ok, info = await engine.retry_user_job(job_id, callback.from_user.id)
         if not ok:
-            await callback.message.answer(tr("retry_not_allowed", "fa"))
+            await callback.message.answer(tr("retry_not_allowed", lang))
         else:
-            await callback.message.answer(tr("retry_started", "fa", job=info))
+            await callback.message.answer(tr("retry_started", lang, job=info))
 
     @router.callback_query(F.data.startswith("errd:"))
     async def on_error_details(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
         await callback.answer()
         job_id = callback.data.split(":", 1)[1]
+        lang = await engine._lang(callback.from_user.id)
         row = await db.fetchrow(
             "SELECT requester_tg_id, error_category, error_message FROM jobs WHERE id = $1",
             _as_uuid(job_id),
@@ -438,45 +485,58 @@ def build_router(engine, db, cfg, state) -> Router:
         cat = row["error_category"] or "-"
         msg = media_mod.redact((row["error_message"] or "")).replace("`", "'")[:400]
         if not msg:
-            msg = tr("err_details_none", "fa")
+            msg = tr("err_details_none", lang)
         await callback.message.answer(f"ℹ️ [{cat}]\n{msg}")
 
-    # ---- cancel button on the progress card ----
+    # ---- cancel button on the progress card (UX-01: cheap checks first,
+    # then an instant ack, then the actual cancel) ----
     @router.callback_query(F.data.startswith("canc:"))
     async def on_cancel_btn(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
         job_id = callback.data.split(":", 1)[1]
         row = await db.fetchrow("SELECT * FROM jobs WHERE id = $1", _as_uuid(job_id))
         if not row:
             await callback.answer(tr("job_gone", "fa"), show_alert=True)
             return
+        lang = await engine._lang(callback.from_user.id)
         if row["requester_tg_id"] != callback.from_user.id and not await is_admin(
             db, cfg, callback.from_user.id
         ):
-            await callback.answer(tr("admin_denied", "fa"), show_alert=True)
+            await callback.answer(tr("admin_denied", lang), show_alert=True)
             return
-        ok = await engine.cancel_job(row)
-        if ok:
-            await callback.answer(tr("cancelled", "fa", job=str(row["id"])[:8]),
-                                  show_alert=True)
-        else:
-            await callback.answer(tr("nothing_to_cancel", "fa"), show_alert=True)
+        await callback.answer(tr("cancelling", lang))
+        await engine.cancel_job(row)
 
     # ---- library-style redeliver button (job-based) ----
     @router.callback_query(F.data.startswith("rdl:"))
     async def on_redeliver(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
         await callback.answer()
         job_id = callback.data.split(":", 1)[1]
         if callback.message is None:
             return
-        lang = await db.fetchval(
-            "SELECT language FROM users WHERE tg_id = $1", callback.from_user.id
-        ) or "fa"
+        lang = await engine._lang(callback.from_user.id)
         ok, method = await engine.redeliver(job_id, callback.message.chat.id,
                                             callback.from_user.id)
         if not ok:
             await callback.message.answer(tr("status_delivery_failed", lang))
 
-    # ---- archive channel discovery ----
+    # ---- archive channel discovery (SPEC-05: propose + per-admin confirm,
+    # never auto-claim) ----
+    pending_archive_chat: dict[int, tuple[str, object, float]] = {}  # admin -> (key, chat, ts)
+
+    def _archive_confirm_kb(key: str, lang: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=tr("btn_confirm_archive", lang),
+                                 callback_data=f"setarch:{key}"),
+            InlineKeyboardButton(text=tr("btn_cancel", lang),
+                                 callback_data="setarch:no"),
+        ]])
+
     @router.channel_post()
     async def on_channel_post(message: Message):
         if state.archive_channel_id:
@@ -485,7 +545,7 @@ def build_router(engine, db, cfg, state) -> Router:
         if chat.type != "channel":
             return
         try:
-            me = await engine.bot.get_me()
+            me = await engine.get_me_cached()
             member = await engine.bot.get_chat_member(chat.id, me.id)
             if member.status != "administrator" or not getattr(
                 member, "can_post_messages", False
@@ -496,14 +556,15 @@ def build_router(engine, db, cfg, state) -> Router:
         except TelegramAPIError as exc:
             log.warning("archive discovery failed", extra={"detail": str(exc)[:200]})
             return
-        state.archive_channel_id = chat.id
-        await db.set_config("archive_channel_id", chat.id)
-        log.info("archive channel discovered", extra={"detail": str(chat.id)})
+        key = uuid_mod.uuid4().hex[:8]
         for admin in await engine.admin_ids():
+            lang = await engine._lang(admin)
+            pending_archive_chat[admin] = (key, chat, time.time())
             try:
                 await engine.bot.send_message(
-                    admin, tr("archive_configured", "fa",
-                              channel=chat.id, title=chat.title or "?")
+                    admin, tr("archive_proposal", lang,
+                              channel=chat.title or "?"),
+                    reply_markup=_archive_confirm_kb(key, lang),
                 )
             except TelegramAPIError:
                 pass
@@ -516,46 +577,60 @@ def build_router(engine, db, cfg, state) -> Router:
             return
         if not await is_admin(db, cfg, message.from_user.id):
             return
+        lang = await engine._lang(message.from_user.id)
         if state.archive_channel_id == chat.id:
-            await message.answer(tr("archive_configured", "fa",
+            await message.answer(tr("archive_configured", lang,
                                     channel=chat.id, title=chat.title or "?"))
             return
-        pending_archive_chat["chat"] = chat
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="📌 تنظیم به‌عنوان کانال آرشیو",
-                                 callback_data="setarch:yes")
-        ]])
+        key = uuid_mod.uuid4().hex[:8]
+        pending_archive_chat[message.from_user.id] = (key, chat, time.time())
         await message.answer(
-            f"این پیام از کانال «{chat.title or chat.id}» فوروارد شده است.",
-            reply_markup=kb,
+            tr("archive_fwd_detected", lang, channel=chat.title or chat.id),
+            reply_markup=_archive_confirm_kb(key, lang),
         )
 
-    pending_archive_chat: dict = {}
-
-    @router.callback_query(F.data == "setarch:yes")
+    @router.callback_query(F.data.startswith("setarch:"))
     async def _set_archive(cb: CallbackQuery):
-        await cb.answer()
-        chat = pending_archive_chat.get("chat")
-        if chat is None or cb.message is None:
+        if _throttled(cb):
+            await cb.answer()
+            return
+        action = cb.data.split(":", 1)[1]
+        lang = await engine._lang(cb.from_user.id)
+        if action == "no":
+            pending_archive_chat.pop(cb.from_user.id, None)
+            await cb.answer(tr("pending_cancelled", lang))
+            return
+        # Pop FIRST: one confirmation per pending entry; only the presser's
+        # own entry counts (no cross-admin races, SPEC-05).
+        entry = pending_archive_chat.pop(cb.from_user.id, None)
+        if entry is None or cb.message is None or action != entry[0]:
+            await cb.answer(tr("cancel_expired", lang), show_alert=True)
+            return
+        key, chat, ts = entry
+        if time.time() - ts > 1800:
+            await cb.answer(tr("cancel_expired", lang), show_alert=True)
             return
         try:
-            me = await engine.bot.get_me()
+            me = await engine.get_me_cached()
             member = await engine.bot.get_chat_member(chat.id, me.id)
             if member.status != "administrator" or not getattr(
                 member, "can_post_messages", False
             ):
-                await cb.message.answer(tr("archive_verify_failed", "fa",
+                await cb.message.answer(tr("archive_verify_failed", lang,
                                            error="bot is not admin with post rights"))
                 return
             test = await engine.bot.send_message(chat.id, "✅ Oxmit archive test")
             await engine.bot.delete_message(chat.id, test.message_id)
         except TelegramAPIError as exc:
-            await cb.message.answer(tr("archive_verify_failed", "fa",
+            await cb.message.answer(tr("archive_verify_failed", lang,
                                        error=str(exc)[:120]))
             return
         state.archive_channel_id = chat.id
         await db.set_config("archive_channel_id", chat.id)
-        await cb.message.answer(tr("archive_configured", "fa",
+        log.info("archive channel confirmed", extra={"detail": str(chat.id)})
+        for uid in [u for u, (k, _c, _t) in pending_archive_chat.items() if k == key]:
+            pending_archive_chat.pop(uid, None)
+        await cb.message.answer(tr("archive_configured", lang,
                                    channel=chat.id, title=chat.title or "?"))
 
     async def sweep_pending() -> None:
@@ -569,6 +644,14 @@ def build_router(engine, db, cfg, state) -> Router:
         now = time.time()
         for uid in [u for u, (_, t) in pending_custom.items() if now - t > 600]:
             pending_custom.pop(uid, None)
+        # archive proposals: 30-minute confirm window (SPEC-05)
+        for uid in [u for u, (_k, _c, t) in pending_archive_chat.items()
+                    if now - t > 1800]:
+            pending_archive_chat.pop(uid, None)
+        # callback throttle map (UX-01): keep it bounded
+        mono = time.monotonic()
+        for uid in [u for u, t in _last_cb.items() if mono - t > 60]:
+            _last_cb.pop(uid, None)
 
     router.sweep_pending = sweep_pending  # type: ignore[attr-defined]
     return router

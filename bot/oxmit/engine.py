@@ -92,6 +92,20 @@ def _load_json(v):
         return None
 
 
+def _permalink(channel_id, message_id) -> str | None:
+    """t.me/c/ deep link for private supergroups/channels (-100 prefix only).
+
+    Anything else (legacy group ids, plain chat ids) has no c/ link form;
+    callers store NULL instead of a dead URL.
+    """
+    if not channel_id or not message_id:
+        return None
+    s = str(channel_id)
+    if s.startswith("-100") and len(s) > 4:
+        return f"https://t.me/c/{s[4:]}/{message_id}"
+    return None
+
+
 async def db_set_admin(db, tg_id: int, value: bool) -> None:
     """Promote/demote; creates the row if the target never used the bot."""
     await db.execute(
@@ -147,6 +161,8 @@ class JobEngine:
         self._submitting: set[str] = set()
         self._bg_tasks: set[asyncio.Task] = set()
         self._last_edit: dict[str, float] = {}
+        self._last_text: dict[str, str] = {}
+        self._me: tuple | None = None
         self._upload_sem = asyncio.Semaphore(max(1, cfg.max_concurrent_uploads))
         self._lang_cache: dict[int, str] = {}
         self._tiers_cache: tuple[dict, float] | None = None
@@ -268,6 +284,27 @@ class JobEngine:
     def invalidate_lang(self, tg_id: int) -> None:
         self._lang_cache.pop(tg_id, None)
 
+    async def get_me_cached(self, ttl: float = 60.0):
+        """Cached bot identity for frequent pollers (SPEC-02).
+
+        The panel summary is polled every few seconds per client and the
+        healthz route per monitor - a live get_me on each call burns Local
+        Bot API quota. Refreshes only when cold/expired, keeps the last
+        good value on Telegram errors, and refreshes state.bot_username.
+        """
+        now = time.time()
+        if self._me and now - self._me[1] < ttl:
+            return self._me[0]
+        try:
+            me = await self.bot.get_me()
+        except TelegramAPIError:
+            if self._me is not None:
+                return self._me[0]
+            raise
+        self._me = (me, now)
+        self.state.bot_username = me.username or ""
+        return me
+
     def _global_thumb(self):
         """Admin-set global thumbnail as an FSInputFile, or None."""
         path = self.state.global_thumb
@@ -348,12 +385,21 @@ class JobEngine:
         if not chat_id or not message_id:
             return
         key = f"{chat_id}:{message_id}"
+        # Text-diff guard (UX-03): identical text would raise
+        # MessageNotModified and burn an API call - skip it early. This also
+        # collapses duplicate "queued" edits from overlapping poll/callback
+        # paths.
+        if len(self._last_text) > 5000:
+            self._last_text.clear()
+        if not force and self._last_text.get(key) == text:
+            return
         now = time.time()
         if len(self._last_edit) > 5000:
             self._last_edit.clear()
         if not force and now - self._last_edit.get(key, 0) < self.cfg.progress_edit_seconds:
             return
         self._last_edit[key] = now
+        self._last_text[key] = text
         self.spawn(self.edit_status_sync(chat_id, message_id, text, markup))
 
     async def edit_status_sync(self, chat_id: int, message_id: int | None, text: str,
@@ -414,7 +460,13 @@ class JobEngine:
             "archiving": "stage_archiving",
             "delivering": "stage_delivering",
         }.get(row["stage"] or row["status"], "stage_encoding")
-        progress = int(info.get("progress") or 0) if info else int(row["progress"] or 0)
+        if info:
+            try:
+                progress = int(float(info.get("progress") or 0))
+            except (TypeError, ValueError):
+                progress = 0
+        else:
+            progress = int(row["progress"] or 0)
         started = _ensure_tz(row["started_at"]) or _ensure_tz(row["enqueued_at"])
         elapsed = _fmt_clock((_utcnow() - started).total_seconds()) if started else "-"
         eta = ""
@@ -429,13 +481,14 @@ class JobEngine:
         speed_txt = ""
         if info and info.get("speed"):
             speed_txt = " " + tr("status_speed", lang, speed=f"{info['speed']:.1f}")
-        filled = round(progress / 10)
-        bar = "█" * filled + "░" * (10 - filled)
+        filled = round(progress / 5)
+        bar = "▰" * filled + "▱" * (20 - filled)
         header = tr("status_header", lang, job=str(row["id"])[:8], profile=row["profile"])
         line = tr("status_line", lang, stage=tr(stage_key, lang), progress=progress,
                   elapsed=elapsed, eta=eta + speed_txt)
         lines.append(header)
-        lines.append(f"{line}\n[{bar}]")
+        lines.append(line)
+        lines.append(f"[{bar}] {int(progress)}%")
         return "\n".join(lines)
 
     async def _user_pref(self, tg_id: int) -> dict:
@@ -454,6 +507,26 @@ class JobEngine:
             "UPDATE jobs SET stage = $2, updated_at = now() WHERE id = $1",
             _as_uuid(job_id), stage,
         )
+
+    async def _touch_completion_lease(self, job_id) -> bool:
+        """Renew the completion lease (F3) around every long await.
+
+        The completion claim expires once updated_at goes stale (10 min) so a
+        crashed holder gets recovered; a live holder must therefore renew
+        updated_at while it works, or a second runner re-claims and deletes
+        the part files under the first one's feet. Fencing: the renewal only
+        lands while the job is still inside the completion pipeline
+        (stage completing/validating/archiving) and still active; once the
+        job left those stages (completed/failed/cancelled by someone else)
+        the heartbeat reports the lost lease.
+        """
+        renewed = await self.db.fetchval(
+            "UPDATE jobs SET updated_at = now() "
+            "WHERE id = $1 AND stage IN ('completing','validating','archiving') "
+            "AND status IN ('queued','processing') RETURNING id",
+            _as_uuid(job_id),
+        )
+        return renewed is not None
 
     async def _frames_for(self, media_id) -> list[int]:
         raw = await self.db.fetchval("SELECT phash FROM media_assets WHERE id = $1", media_id)
@@ -585,7 +658,8 @@ class JobEngine:
                 raise AdmissionError("queue_full")
         # Disk admission last: accounts for bytes already reserved by active
         # jobs (ArgonsEncoder-style reservation accounting, PostgreSQL-backed).
-        need = int(size_bytes * self.cfg.admission_need_factor) + 5 * 1024**3
+        need = int(size_bytes * self.cfg.admission_need_factor) \
+            + self.cfg.admission_floor_bytes
         reserved = await self.db.fetchval(
             "SELECT coalesce(sum(reserved_bytes), 0) FROM jobs "
             "WHERE status IN ('queued', 'processing')"
@@ -610,6 +684,51 @@ class JobEngine:
             hours = max_s / 3600
             max_h = f"{hours:.0f}h" if hours >= 1 else f"{max_s / 60:.0f}m"
             raise AdmissionError("too_long", max_h=max_h)
+
+    async def _recheck_user_admission(self, conn, tg_id: int,
+                                      size_bytes: int) -> None:
+        """In-transaction admission recheck under the per-user advisory lock.
+
+        check_admission is UX-only: it runs outside any lock, so two
+        concurrent submissions can both pass it and overshoot the user's
+        caps (F9 TOCTOU). This mirrors its per-user fairness checks against
+        the same transaction that inserts the job row, raising the same
+        AdmissionError codes the handlers already localize.
+        """
+        limits = await self.effective_limits(tg_id)
+        active = await conn.fetchval(
+            "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
+            "AND status IN ('queued','processing','deferred')",
+            tg_id,
+        )
+        if int(active or 0) >= limits["max_active"]:
+            raise AdmissionError("user_busy", max_active=limits["max_active"])
+        hourly = await conn.fetchval(
+            "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
+            "AND enqueued_at > now() - interval '1 hour'",
+            tg_id,
+        )
+        if int(hourly or 0) >= limits["max_per_hour"]:
+            raise AdmissionError("rate_limited")
+        daily = await conn.fetchval(
+            "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
+            "AND enqueued_at > now() - interval '24 hours'",
+            tg_id,
+        )
+        if int(daily or 0) >= self.cfg.max_jobs_per_day:
+            raise AdmissionError("daily_quota", quota=self.cfg.max_jobs_per_day)
+        if limits["daily_quota_bytes"]:
+            used_bytes = await conn.fetchval(
+                "SELECT coalesce(sum(source_size), 0) FROM jobs "
+                "WHERE requester_tg_id = $1 "
+                "AND enqueued_at > now() - interval '24 hours' "
+                "AND status IN ('queued','processing','deferred','completed')",
+                tg_id,
+            )
+            if int(used_bytes or 0) + size_bytes > limits["daily_quota_bytes"]:
+                raise AdmissionError("daily_quota_bytes",
+                                     quota=media_mod.human_size(limits["daily_quota_bytes"]),
+                                     used=media_mod.human_size(int(used_bytes or 0)))
 
     async def _auto_pause(self) -> None:
         if not self.state.paused:
@@ -657,6 +776,8 @@ class JobEngine:
         # Fingerprint runs in the background worker ONLY: similarity dedup
         # compares against archived results, which are always minutes away -
         # keeping it on the submission critical path is pure latency.
+        # Submission itself happens once, from run_job (SPEC-03): an eager
+        # submit here raced the worker into hashing the same 4GB source twice.
         filename_clean = media_mod.sanitize_filename(filename)
         media_id = await self.db.fetchval(
             """
@@ -674,8 +795,6 @@ class JobEngine:
             tg_file_id, tg_file_unique_id, json.dumps(probe),
             filename_clean.lower(),
         )
-        self.fingerprinter.submit(media_id, str(src_path),
-                                  probe.get("duration_s") or 0.0)
         return media_id, sha, probe, str(src_path)
 
     def _custom_params(self, target_mb, duration_s, size_bytes) -> tuple[dict | None, bool, str | None]:
@@ -775,6 +894,15 @@ class JobEngine:
         lock_key = f"{sha}:{profile_key}:v{version}"
         async with self.db.pool.acquire() as conn:
             async with conn.transaction():
+                # Per-user admission lock first (F9), then the dedup key:
+                # serialize a user's concurrent submissions so the in-tx
+                # recheck below cannot be raced (Argons per-user pattern).
+                if not is_admin:
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+                        f"admit:{tg_id}",
+                    )
+                    await self._recheck_user_admission(conn, tg_id, size_bytes)
                 await conn.execute(
                     "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", lock_key
                 )
@@ -835,7 +963,8 @@ class JobEngine:
                             (await self.effective_limits(tg_id))["priority"],
                             size_bytes, stable_path, source_msg_id, status_msg_id,
                             json.dumps({"crf": str(x265_crf), "preset": "superfast"}),
-                            int(size_bytes * self.cfg.admission_need_factor) + 5 * 1024**3,
+                            int(size_bytes * self.cfg.admission_need_factor)
+                            + self.cfg.admission_floor_bytes,
                         )
                         await conn.execute(
                             """
@@ -894,7 +1023,7 @@ class JobEngine:
                     "deferred" if deferred_need else "queued",
                     json.dumps(profile_params) if profile_params else None,
                     deferred_need or int(size_bytes * self.cfg.admission_need_factor)
-                    + 5 * 1024**3,
+                    + self.cfg.admission_floor_bytes,
                     70 if is_admin else (await self.effective_limits(tg_id))["priority"],
                 )
                 await conn.execute(
@@ -963,100 +1092,6 @@ class JobEngine:
         if shi > 0:
             parts.append(est.format_time_range(slo, shi))
         return " | ".join(parts)
-
-    async def submit_existing_media(
-        self, *, media_id, profile_key: str, tg_id: int, chat_id: int | None,
-        status_msg_id: int | None, target_mb: int | None = None,
-    ) -> dict:
-        """Resubmit an already-registered media asset under another profile."""
-        prof = BY_KEY.get(profile_key)
-        if not prof:
-            raise AdmissionError("bad_profile")
-        media = await self.db.fetchrow(
-            "SELECT sha256, size_bytes, duration_s, probe FROM media_assets WHERE id = $1",
-            media_id,
-        )
-        if not media:
-            raise AdmissionError("source_missing")
-        try:
-            probe = json.loads(media["probe"]) if media["probe"] else {}
-        except (json.JSONDecodeError, TypeError):
-            probe = {}
-        profile_params: dict | None = None
-        if profile_key == "custom":
-            profile_params, _low, err = self._custom_params(
-                target_mb, media["duration_s"], media["size_bytes"])
-            if err:
-                raise AdmissionError("bad_target", detail=str(target_mb))
-        is_admin = tg_id in await self.admin_ids()
-        await self.check_admission(tg_id, media["size_bytes"], is_admin=is_admin)
-        await self.check_duration_limit(tg_id, media["duration_s"], is_admin=is_admin)
-        version = prof.version
-        sha = media["sha256"]
-        limits = await self.effective_limits(tg_id)
-        lock_key = f"{sha}:{profile_key}:v{version}"
-        async with self.db.pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", lock_key
-                )
-                reusable_parts = await dedup.find_reusable_parts(self.db, sha, profile_key, version)
-                if reusable_parts:
-                    return await self._reuse_archive(
-                        reusable_parts, tg_id=tg_id, chat_id=chat_id,
-                        status_msg_id=status_msg_id, profile_key=profile_key,
-                        sha=sha, size_bytes=media["size_bytes"], reuse_kind="exact",
-                    )
-                inflight = await dedup.find_inflight_job(self.db, sha, profile_key, version)
-                if inflight is not None:
-                    await conn.execute(
-                        """
-                        INSERT INTO job_requesters
-                            (job_id, tg_id, chat_id, source_message_id, status_message_id)
-                        VALUES ($1,$2,$3,$4,$5)
-                        ON CONFLICT (job_id, tg_id) DO NOTHING
-                        """,
-                        inflight["id"], tg_id, chat_id or 0, None, status_msg_id,
-                    )
-                    await self.db.bump("dedup_inflight_joined")
-                    return {"outcome": "joined", "job_id": str(inflight["id"])}
-                src_path_row = await conn.fetchrow(
-                    """
-                    SELECT j.source_path FROM jobs j
-                    WHERE j.media_id = $1 AND j.source_path IS NOT NULL
-                    ORDER BY j.enqueued_at DESC LIMIT 1
-                    """,
-                    media_id,
-                )
-                job_id = await conn.fetchval(
-                    """
-                    INSERT INTO jobs(requester_tg_id, media_id, profile, profile_version,
-                                     effective_profile, status, priority, source_size,
-                                     source_path, status_message_id,
-                                     progress_changed_at, stage, profile_params)
-                    VALUES ($1,$2,$3,$4,$5,'queued',$10,$6,$7,$8, now(), 'queued', $9::jsonb)
-                    RETURNING id
-                    """,
-                    tg_id, media_id, profile_key, version,
-                    resolve_variant(profile_key, probe.get("width"), probe.get("height")),
-                    media["size_bytes"],
-                    src_path_row["source_path"] if src_path_row else None,
-                    status_msg_id,
-                    json.dumps(profile_params) if profile_params else None,
-                    70 if is_admin else limits["priority"],
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO job_requesters
-                        (job_id, tg_id, chat_id, source_message_id, status_message_id)
-                    VALUES ($1, $2, $3, NULL, $4)
-                    ON CONFLICT (job_id, tg_id) DO NOTHING
-                    """,
-                    job_id, tg_id, chat_id or 0, status_msg_id,
-                )
-        job_id = _as_uuid(job_id)
-        self.spawn(self.run_job(str(job_id)))
-        return {"outcome": "queued", "job_id": str(job_id)}
 
     # ------------------------------------------------------------------
     # reuse path
@@ -1166,23 +1201,39 @@ class JobEngine:
         if ext not in COPY_EXTS:
             ext = ".bin"
         staged = Path(self.cfg.media_incoming) / job_id / f"source{ext}"
-        if staged.exists():
+        # Trust an existing staged file only when it matches the source size:
+        # a crashed copy used to leave a truncated file that was silently
+        # encoded later (F4).
+        total = source.stat().st_size
+        if staged.exists() and staged.stat().st_size == total:
             return str(staged)
         staged.parent.mkdir(parents=True, exist_ok=True)
         try:
             await asyncio.to_thread(os.link, source, staged)
         except OSError:
-            total = source.stat().st_size
+            # Cross-device fallback: copy to a .part sibling, verify the size,
+            # then atomically swap it in. A crash mid-copy leaves at worst a
+            # discarded .part, never a truncated "source" (Argons tmp+replace
+            # pattern).
+            part = staged.with_name(staged.name + ".part")
             self._copy_state[job_id] = {"done": 0, "total": total, "t0": time.time()}
             reporter = asyncio.create_task(self._report_copy_progress(job_id))
             try:
                 await media_mod.copy_with_progress(
-                    source, staged,
+                    source, part,
                     lambda done: self._copy_state[job_id].update(done=done),
                 )
+                if not part.is_file() or part.stat().st_size != total:
+                    raise media_mod.MediaError("staging failed: truncated copy")
+                os.replace(part, staged)
             finally:
                 self._copy_state.pop(job_id, None)
                 reporter.cancel()
+                if part.exists():
+                    try:
+                        part.unlink()
+                    except OSError:
+                        pass
         if not os.path.isfile(staged):
             raise media_mod.MediaError("staging failed: staged file missing")
         log.info("staging done", extra={
@@ -1200,7 +1251,7 @@ class JobEngine:
                 SELECT j.id, j.media_id, j.effective_profile, j.status, j.encore_job_id,
                        j.source_path, j.source_size, j.input_params, j.profile_params,
                        j.requester_tg_id, j.status_message_id, j.retries,
-                       m.duration_s, m.filename
+                       m.duration_s, m.filename, m.fingerprinted
                 FROM jobs j JOIN media_assets m ON m.id = j.media_id
                 WHERE j.id = $1
                 """,
@@ -1225,7 +1276,7 @@ class JobEngine:
                 _as_uuid(job_id),
             )
             need = int((row["source_size"] or 0) * self.cfg.admission_need_factor) \
-                + 5 * 1024**3
+                + self.cfg.admission_floor_bytes
             if max(0, free - int(reserved or 0)) < need:
                 if self.cfg.disk_defer:
                     # Capacity vanished between admission and start - defer
@@ -1260,7 +1311,12 @@ class JobEngine:
                 "UPDATE jobs SET started_at = COALESCE(started_at, now()) WHERE id = $1",
                 _as_uuid(job_id),
             )
-            self.fingerprinter.submit(row["media_id"], used_path, row["duration_s"] or 0.0)
+            # Single fingerprint submission (SPEC-03): register_media used to
+            # submit too - the worker's "WHERE fingerprinted = FALSE" guard
+            # made the second pass pure wasted CPU on a 4GB decode.
+            if not row["fingerprinted"]:
+                self.fingerprinter.submit(row["media_id"], used_path,
+                                          row["duration_s"] or 0.0)
 
             # --- remux utility: stream-copy container shift, no Encore job ---
             if (row["effective_profile"] or "") == "remux":
@@ -1377,7 +1433,7 @@ class JobEngine:
         if not self.cfg.disk_defer:
             return
         rows = await self.db.fetch(
-            "SELECT id, reserved_bytes, source_size FROM jobs "
+            "SELECT id, requester_tg_id, reserved_bytes, source_size FROM jobs "
             "WHERE status = 'deferred' ORDER BY enqueued_at LIMIT 10"
         )
         if not rows:
@@ -1392,8 +1448,20 @@ class JobEngine:
             # deferred job's stored reservation may reflect an older factor
             # or a temporarily distorted admission state.
             need = int((row["source_size"] or 0) * self.cfg.admission_need_factor) \
-                + 5 * 1024**3
+                + self.cfg.admission_floor_bytes
             if free < need:
+                continue
+            # Per-user cap re-check (Argons queue_manager pattern): limits may
+            # have changed while the job sat deferred - promotion must not
+            # push the user past max_active. Per-job loop instead of one SQL
+            # subquery because max_active resolves per user/tier in Python.
+            limits = await self.effective_limits(row["requester_tg_id"])
+            active = await self.db.fetchval(
+                "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
+                "AND status IN ('queued','processing','deferred')",
+                row["requester_tg_id"],
+            )
+            if int(active or 0) >= limits["max_active"]:
                 continue
             free -= need
             await self.db.execute(
@@ -1466,7 +1534,12 @@ class JobEngine:
     async def reconcile_job(self, row) -> None:
         info = await self.encre.get_job(row["encore_job_id"])
         status = info.get("status")
-        progress = int(info.get("progress") or 0)
+        # Encore has been observed sending "37.5" - a bare int() would crash
+        # the poll loop for that job (SPEC-01).
+        try:
+            progress = int(float(info.get("progress") or 0))
+        except (TypeError, ValueError):
+            progress = 0
         job_id = str(row["id"])
 
         if status == "IN_PROGRESS":
@@ -1600,12 +1673,35 @@ class JobEngine:
             return False, "not_allowed"
         if row["retries"] >= self.cfg.job_retries + 2:
             return False, "limit"
-        await self.db.execute(
+        # Admission-lite (F2): a requeue must respect the same fairness caps as
+        # a fresh submission. Admins are exempt. The new reject reasons
+        # ("queue_full"/"user_busy") have no dedicated localized string yet, so
+        # both map to the existing generic "limit" reason - the button handler
+        # shows the same "retry_not_allowed" text for every False reason.
+        if tg_id not in await self.admin_ids():
+            queued = await self.db.fetchval("SELECT count(*) FROM jobs WHERE status = 'queued'")
+            if int(queued or 0) >= self.cfg.max_queued:
+                return False, "limit"  # queue_full
+            limits = await self.effective_limits(row["requester_tg_id"])
+            active = await self.db.fetchval(
+                "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
+                "AND status IN ('queued','processing','deferred')",
+                row["requester_tg_id"],
+            )
+            if int(active or 0) >= limits["max_active"]:
+                return False, "limit"  # user_busy
+        # Atomic claim (Argons claim-with-TTL pattern): the increment and the
+        # cap guard live in one conditional UPDATE so concurrent presses
+        # cannot race each other back to unlimited retries.
+        claimed = await self.db.execute(
             "UPDATE jobs SET status='queued', encore_job_id=NULL, progress=0, "
-            "error_category=NULL, error_message=NULL, updated_at=now(), stage='queued' "
-            "WHERE id=$1 AND status='failed'",
-            row["id"],
+            "error_category=NULL, error_message=NULL, updated_at=now(), stage='queued', "
+            "retries = retries + 1 "
+            "WHERE id=$1 AND status='failed' AND retries < $2",
+            row["id"], self.cfg.job_retries + 2,
         )
+        if claimed == "UPDATE 0":
+            return False, "limit"
         self.spawn(self.run_job(str(row["id"])))
         return True, str(row["id"])[:8]
 
@@ -1627,6 +1723,9 @@ class JobEngine:
         log.error("job failed",
                   extra={"job_id": str(row["id"]), "status": category, "detail": detail[:300]})
         await self._cleanup_job_dirs(str(row["id"]), keep_output=False)
+        # job_requesters includes the requester, so this single loop reaches
+        # everyone - the requester used to get a second identical status_failed
+        # edit right after the loop (UX-04).
         for r in await self.db.fetch(
             "SELECT chat_id, status_message_id, tg_id FROM job_requesters WHERE job_id = $1",
             row["id"],
@@ -1637,12 +1736,6 @@ class JobEngine:
                 tr("status_failed", lang), markup=failure_markup(str(row["id"]), lang),
                 force=True,
             )
-        lang = await self._lang(row["requester_tg_id"])
-        self._edit_status(
-            row["requester_tg_id"], row["status_message_id"],
-            tr("status_failed", lang), markup=failure_markup(str(row["id"]), lang),
-            force=True,
-        )
 
     async def _mark_cancelled(self, row) -> None:
         cancelled = await self.db.fetchval(
@@ -1728,6 +1821,12 @@ class JobEngine:
         output_size = output_path.stat().st_size
         source_size = row["source_size"] or 0
 
+        # F3: prove the lease before each long await; on a lost lease another
+        # runner owns the completion - just stand down.
+        if not await self._touch_completion_lease(job_id):
+            log.warning("completion lease lost, standing down",
+                        extra={"job_id": job_id})
+            return
         try:
             out_probe = await media_mod.probe_video(output_path)
         except media_mod.MediaError as exc:
@@ -1753,6 +1852,10 @@ class JobEngine:
                 pass
 
         await self._set_stage(job_id, "archiving")
+        if not await self._touch_completion_lease(job_id):
+            log.warning("completion lease lost, standing down",
+                        extra={"job_id": job_id})
+            return
         out_sha = await media_mod.sha256_file(output_path)
         output_media_id = await self.db.fetchval(
             """
@@ -1864,6 +1967,10 @@ class JobEngine:
         # --- real archive upload ---
         # thumbnail was resolved earlier: admin global thumb or an
         # auto-grabbed output frame (aiogram needs an FSInputFile).
+        if not await self._touch_completion_lease(job_id):
+            log.warning("completion lease lost, standing down",
+                        extra={"job_id": job_id})
+            return
         try:
             sent = await self._archive_upload(
                 path=output_path, caption=caption, thumbnail=thumbnail,
@@ -1883,8 +1990,7 @@ class JobEngine:
             "UPDATE media_assets SET tg_file_id = $2, tg_file_unique_id = $3 WHERE id = $1",
             output_media_id, out_file_id, out_unique,
         )
-        channel_str = str(self.state.archive_channel_id).replace("-100", "", 1)
-        permalink = f"https://t.me/c/{channel_str}/{archive_msg_id}"
+        permalink = _permalink(self.state.archive_channel_id, archive_msg_id)
         archive_insert_sql = """
             INSERT INTO archive_records
                 (source_media_id, output_media_id, profile, profile_version, channel_id,
@@ -1965,6 +2071,12 @@ class JobEngine:
         lang = await self._lang(row["requester_tg_id"])
         split_bytes = int(self.cfg.max_upload_bytes * self.cfg.split_safety)
         parts_dir = Path(self.cfg.media_out) / job_id / "parts"
+        # The split itself is the long await this lease exists for (F3):
+        # split_by_size deletes stale part* files before segmenting.
+        if not await self._touch_completion_lease(job_id):
+            log.warning("completion lease lost before split, standing down",
+                        extra={"job_id": job_id})
+            return False
         try:
             parts = await asyncio.to_thread(
                 media_mod.split_by_size, str(output_path), str(parts_dir),
@@ -2000,6 +2112,13 @@ class JobEngine:
                 f"{media_filename} (part {i + 1}/{total})", profile_title,
                 out_probe, source_size, part_size, job_short,
             )
+            # F3: renew the lease before every part upload; if it is lost,
+            # another runner re-claimed and is re-splitting - continuing here
+            # would upload parts it is about to delete.
+            if not await self._touch_completion_lease(job_id):
+                log.warning("completion lease lost during split, standing down",
+                            extra={"job_id": job_id, "detail": f"part {i + 1}/{total}"})
+                return False
             try:
                 sent = await self._archive_upload(
                     path=part, caption=caption, thumbnail=thumbnail,
@@ -2012,8 +2131,7 @@ class JobEngine:
                 await self.fail_job(row, "archive",
                                     f"part {i + 1} upload failed: {str(exc)[:150]}")
                 return False
-            channel_str = str(self.state.archive_channel_id).replace("-100", "", 1)
-            permalink = f"https://t.me/c/{channel_str}/{sent.message_id}"
+            permalink = _permalink(self.state.archive_channel_id, sent.message_id)
             rec_id = await self.db.fetchval(
                 """
                 INSERT INTO archive_records
@@ -2042,7 +2160,7 @@ class JobEngine:
             row["id"], output_size, output_media_id,
         )
         if not done:
-            return
+            return False
         await self.db.bump("jobs_encoded")
         await self.db.bump("bytes_out", output_size)
         if source_size > output_size:

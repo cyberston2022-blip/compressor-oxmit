@@ -46,14 +46,6 @@ async def find_reusable_parts(
     )
 
 
-async def find_reusable_archive(
-    db: asyncpg.Pool, sha256: str, profile: str, version: int = 1
-) -> asyncpg.Record | None:
-    """Latest valid archived result for (source sha, profile, version)."""
-    rows = await find_reusable_parts(db, sha256, profile, version)
-    return rows[0] if rows else None
-
-
 async def find_inflight_job(
     db: asyncpg.Pool, sha256: str, profile: str, version: int = 1
 ) -> asyncpg.Record | None:
