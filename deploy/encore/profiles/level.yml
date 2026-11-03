@@ -1,0 +1,20 @@
+name: level
+description: "Smart compression - CRF and preset supplied via profileParams (user level 1-20 mapped to CRF 18-28; aq-mode 3 protects dark scenes)"
+scaling: bicubic
+encodes:
+  - type: X264Encode
+    suffix: ""
+    width: null
+    height: null
+    twoPass: false
+    params:
+      crf: "#{profileParams['crf'] ?: '23'}"
+      preset: "#{profileParams['preset'] ?: 'faster'}"
+      aq-mode: "3"
+      rc-lookahead: "50"
+      pix_fmt: yuv420p
+      movflags: "+faststart"
+    audioEncode:
+      type: AudioEncode
+      codec: aac
+      bitrate: 128k

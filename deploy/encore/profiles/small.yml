@@ -1,0 +1,18 @@
+name: small
+description: "Smaller output size with reasonable quality (HEVC/H.265 CRF27)"
+scaling: bicubic
+encodes:
+  - type: X265Encode
+    suffix: ""
+    width: null
+    height: null
+    twoPass: false
+    params:
+      crf: "27"
+      preset: faster
+      pix_fmt: yuv420p
+      movflags: "+faststart"
+    audioEncode:
+      type: AudioEncode
+      codec: aac
+      bitrate: 96k

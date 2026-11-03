@@ -1,0 +1,18 @@
+name: highq
+description: "High quality with moderate compression (H.264 CRF19)"
+scaling: bicubic
+encodes:
+  - type: X264Encode
+    suffix: ""
+    width: null
+    height: null
+    twoPass: false
+    params:
+      crf: "19"
+      preset: faster
+      pix_fmt: yuv420p
+      movflags: "+faststart"
+    audioEncode:
+      type: AudioEncode
+      codec: aac
+      bitrate: 160k

@@ -1,0 +1,12 @@
+balanced: balanced.yml
+highq: highq.yml
+small: small.yml
+maxcomp: maxcomp.yml
+tgcompat: tgcompat.yml
+r1080: r1080.yml
+r720: r720.yml
+r480: r480.yml
+custom: custom.yml
+level: level.yml
+level265: level265.yml
+repair: repair.yml

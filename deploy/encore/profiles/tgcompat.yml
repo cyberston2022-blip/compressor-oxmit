@@ -1,0 +1,19 @@
+name: tgcompat
+description: "Maximum Telegram playback compatibility (H.264 High, yuv420p, AAC, faststart)"
+scaling: bicubic
+encodes:
+  - type: X264Encode
+    suffix: ""
+    width: null
+    height: null
+    twoPass: false
+    params:
+      crf: "22"
+      preset: veryfast
+      profile: high
+      pix_fmt: yuv420p
+      movflags: "+faststart"
+    audioEncode:
+      type: AudioEncode
+      codec: aac
+      bitrate: 128k

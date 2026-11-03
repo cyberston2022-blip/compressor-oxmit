@@ -1,0 +1,18 @@
+name: r480
+description: "Scale down to 480p (never upscales - guarded by the bot)"
+scaling: bicubic
+encodes:
+  - type: X264Encode
+    suffix: ""
+    width: 854
+    height: null
+    twoPass: false
+    params:
+      crf: "23"
+      preset: faster
+      pix_fmt: yuv420p
+      movflags: "+faststart"
+    audioEncode:
+      type: AudioEncode
+      codec: aac
+      bitrate: 96k

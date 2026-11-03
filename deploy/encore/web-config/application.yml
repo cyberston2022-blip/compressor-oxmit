@@ -1,0 +1,9 @@
+# Encore web security (HTTP basic auth). Mounted into encore-web at /config;
+# ${ENCRE_PASSWORD} is resolved from the container environment at runtime.
+encore-settings:
+  security:
+    enabled: true
+    users:
+      bot:
+        password: ${ENCRE_PASSWORD}
+        role: ADMIN

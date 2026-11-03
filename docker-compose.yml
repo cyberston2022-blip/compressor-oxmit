@@ -1,0 +1,186 @@
+name: oxmit
+
+# SEC-5: bound container log growth on the system disk.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-encore-env: &encore-env
+  ENCORE_SETTINGS_REDIS_URI: redis://redis:6379
+  ENCORE_SETTINGS_PROFILE_LOCATION: file:/profiles/profiles.yml
+  # Shared work dir for segmented (chunk-parallel) transcoding - same bind
+  # mount across all instances on this single host.
+  ENCORE_SETTINGS_SHARED_WORK_DIR: /media/work
+
+services:
+  redis:
+    image: redis:8.6-alpine
+    container_name: oxmit-redis
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      ["redis-server", "--appendonly", "yes", "--save", "60", "1",
+       "--maxmemory", "512mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: oxmit-postgres
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # REST API of SVT Encore (official image, pinned). API-only mode: workers
+  # do the transcoding. Protected by HTTP basic auth, bound to the internal
+  # docker network plus a 127.0.0.1 host mapping for diagnostics.
+  encore-web:
+    image: ghcr.io/svt/encore-web:1.0.0
+    container_name: oxmit-encore-web
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      <<: *encore-env
+      ENCORE_SETTINGS_POLL_DISABLED: "true"
+      ENCORE_SETTINGS_CONCURRENCY: "2"
+      ENCORE_SETTINGS_SECURITY_ENABLED: "true"
+      ENCRE_PASSWORD: ${ENCRE_PASSWORD}
+      SPRING_CONFIG_ADDITIONAL_LOCATION: file:/config/
+    volumes:
+      - ./deploy/encore/profiles:/profiles:ro
+      - ./deploy/encore/web-config:/config:ro
+      - ${MEDIA_HOST_DIR}:/media
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [internal]
+
+  # One-shot workers: encore-worker processes jobs until the queue is empty
+  # then exits; docker restart policy relaunches it. Bounded pool via
+  # replicas + per-replica cpu/mem limits.
+  encore-worker:
+    image: ghcr.io/svt/encore-worker:1.0.0
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      <<: *encore-env
+      ENCORE_SETTINGS_POLL_QUEUE: "0"
+      ENCORE_SETTINGS_POLL_HIGHER_PRIO: "false"
+      ENCORE_SETTINGS_WORKER_DRAIN_QUEUE: "true"
+      # Tolerate corrupt packets in damaged sources (bot validates outputs).
+      ENCORE_SETTINGS_ENCODING_EXIT_ON_ERROR: "false"
+    volumes:
+      - ./deploy/encore/profiles:/profiles:ro
+      - ${MEDIA_HOST_DIR}:/media
+      # ffmpeg 7.0.2 static override: the bundled 8.1 aborts ("Error muxing a
+      # packet", -22) partway through long damaged sources; 7.x tolerates them.
+      # See docs/FULL-REPORT.md, Issue A.
+      - ./deploy/wrapper/ffmpeg:/usr/local/bin/ffmpeg:ro
+      # Read-only access to downloaded Telegram files. Together with
+      # WORKERS_READ_BOTAPI=true this removes the staging copy. Active after
+      # the next worker recreation (do not recreate while a job is running).
+      - botapi_data:/var/lib/telegram-bot-api:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [internal]
+    deploy:
+      replicas: ${WORKER_REPLICAS}
+      resources:
+        limits:
+          # Max cap; the bot's CPU tuner tightens this live (1 job -> 7 cores,
+          # 2 jobs -> 3.2 each — see bot/oxmit/resources.py).
+          cpus: "7.0"
+          memory: 4500M
+
+  # Official tdlib/telegram-bot-api built from a pinned commit.
+  # --local: getFile returns local paths (shared volume with the bot) and
+  # enables large uploads (up to 2000MB) / unlimited downloads.
+  telegram-bot-api:
+    build:
+      context: ./deploy/telegram-bot-api
+      args:
+        TBAPI_COMMIT: ${TBAPI_COMMIT}
+    image: oxmit/telegram-bot-api:local
+    container_name: oxmit-botapi
+    restart: unless-stopped
+    logging: *default-logging
+    # Runs as root so downloaded files stay world-readable for the bot user.
+    command:
+      - "--api-id=${TELEGRAM_API_ID}"
+      - "--api-hash=${TELEGRAM_API_HASH}"
+      - "--local"
+      - "--http-port=8081"
+      - "--dir=/var/lib/telegram-bot-api"
+      - "--temp-dir=/var/lib/telegram-bot-api/tmp"
+      - "--verbosity=1"
+    volumes:
+      - botapi_data:/var/lib/telegram-bot-api
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/8081' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  bot:
+    build: ./bot
+    image: oxmit/bot:local
+    container_name: oxmit-bot
+    restart: unless-stopped
+    logging: *default-logging
+    env_file: .env
+    group_add:
+      - "${DOCKER_GID:-999}"
+    environment:
+      PG_DSN: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      PANEL_CERT_DIR: /certs
+    volumes:
+      - ${MEDIA_HOST_DIR}:/media
+      - botapi_data:/var/lib/telegram-bot-api
+      - ./deploy/certs:/certs:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "127.0.0.1:8091:8080"
+      - "8090:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      telegram-bot-api:
+        condition: service_healthy
+      encore-web:
+        condition: service_started
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  redis_data:
+  pg_data:
+  botapi_data:
