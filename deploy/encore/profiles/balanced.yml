@@ -1,5 +1,5 @@
 name: balanced
-description: "General-purpose balance between quality, speed and size (H.264 CRF22)"
+description: "General-purpose balance between quality, speed and size (H.264 CRF22 veryfast)"
 scaling: bicubic
 encodes:
   - type: X264Encode
@@ -8,8 +8,9 @@ encodes:
     height: null
     twoPass: false
     params:
-      crf: "22"
-      preset: faster
+      crf: "#{profileParams['crf'] ?: '22'}"
+      preset: "#{profileParams['preset'] ?: 'veryfast'}"
+      threads: "#{profileParams['threads'] ?: '6'}"
       pix_fmt: yuv420p
       movflags: "+faststart"
     audioEncode:

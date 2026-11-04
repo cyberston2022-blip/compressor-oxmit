@@ -112,6 +112,16 @@ class Settings:
     disk_defer: bool = True
     admission_need_factor: float = 2.2
 
+    # Master Performance & Compression Optimization flags
+    adaptive_codec_enabled: bool = True
+    adaptive_resolution_enabled: bool = True
+    fastpath_copy_enabled: bool = True
+    audio_copy_enabled: bool = True
+    custom_encoding_mode: str = "adaptive"
+    ffmpeg_threads_single: int = 6
+    ffmpeg_threads_multi: int = 3
+    target_accuracy_tolerance_pct: float = 2.0
+
     internal_secret: str = ""
     internal_test_token: str = ""
     internal_panel_token: str = ""
@@ -196,6 +206,12 @@ class Settings:
             errs.append(f"JOB_RETRIES={self.job_retries} must be >= 0")
         if self.segment_enabled and self.segment_length <= 0:
             errs.append("SEGMENT_LENGTH must be > 0 when SEGMENT_ENABLED=true")
+        if not 1 <= self.ffmpeg_threads_single <= 32:
+            errs.append(f"FFMPEG_THREADS_SINGLE={self.ffmpeg_threads_single} outside 1..32")
+        if not 1 <= self.ffmpeg_threads_multi <= 32:
+            errs.append(f"FFMPEG_THREADS_MULTI={self.ffmpeg_threads_multi} outside 1..32")
+        if self.custom_encoding_mode not in ("adaptive", "one_pass", "two_pass"):
+            errs.append(f"CUSTOM_ENCODING_MODE={self.custom_encoding_mode} must be adaptive, one_pass, or two_pass")
         return errs
 
     @property
@@ -285,6 +301,16 @@ def load_settings() -> Settings:
     s.max_concurrent_uploads = _int("MAX_CONCURRENT_UPLOADS", 2)
     s.disk_defer = _bool("DISK_DEFER", True)
     s.admission_need_factor = _float("ADMISSION_NEED_FACTOR", 2.2)
+
+    # Performance & Optimization Settings
+    s.adaptive_codec_enabled = _bool("ADAPTIVE_CODEC_ENABLED", True)
+    s.adaptive_resolution_enabled = _bool("ADAPTIVE_RESOLUTION_ENABLED", True)
+    s.fastpath_copy_enabled = _bool("FASTPATH_COPY_ENABLED", True)
+    s.audio_copy_enabled = _bool("AUDIO_COPY_ENABLED", True)
+    s.custom_encoding_mode = os.getenv("CUSTOM_ENCODING_MODE", "adaptive").strip().lower()
+    s.ffmpeg_threads_single = _int("FFMPEG_THREADS_SINGLE", 6)
+    s.ffmpeg_threads_multi = _int("FFMPEG_THREADS_MULTI", 3)
+    s.target_accuracy_tolerance_pct = _float("TARGET_ACCURACY_TOLERANCE_PCT", 2.0)
 
     s.internal_secret = os.getenv("INTERNAL_SECRET", "")
     s.internal_test_token = os.getenv("INTERNAL_TEST_TOKEN", "")

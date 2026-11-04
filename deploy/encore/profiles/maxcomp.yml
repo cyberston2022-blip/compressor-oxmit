@@ -1,5 +1,5 @@
 name: maxcomp
-description: "Maximum compression, slowest (HEVC/H.265 CRF30 medium)"
+description: "Maximum compression - HEVC/H.265 CRF30 superfast (avoids medium cliff)"
 scaling: bicubic
 encodes:
   - type: X265Encode
@@ -8,8 +8,9 @@ encodes:
     height: null
     twoPass: false
     params:
-      crf: "30"
-      preset: medium
+      crf: "#{profileParams['crf'] ?: '30'}"
+      preset: "#{profileParams['preset'] ?: 'superfast'}"
+      threads: "#{profileParams['threads'] ?: '6'}"
       pix_fmt: yuv420p
       movflags: "+faststart"
     audioEncode:

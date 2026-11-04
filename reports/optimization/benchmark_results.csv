@@ -1,0 +1,26 @@
+test_category,profile_or_preset,codec,wall_time_sec,speed_x,fps,cpu_percent,size_mb,target_error_pct,ssim,psnr_db,notes
+Target Size Accuracy (Film/Motion),Custom 2-Pass ABR (Current),libx264,0.65,46.01,1380.2,360.0,0.0,-100.0,,,"P1: 0.07s, P2: 0.58s"
+Target Size Accuracy (Film/Motion),Custom 1-Pass ABR+VBV,libx264,26.25,1.14,34.3,360.0,5.93,-1.11,0.791465,33.733326,Single-pass bitrate constrained
+Target Size Accuracy (Film/Motion),Custom 1-Pass CRF+VBV Cap,libx264,26.09,1.15,34.5,360.0,8.02,33.73,0.795392,34.296343,Quality floor with ceiling cap
+Target Size Accuracy (Screen/Text),Custom 2-Pass ABR (Current),libx264,0.57,52.95,1588.6,360.0,0.0,-100.0,,,"P1: 0.03s, P2: 0.54s"
+Target Size Accuracy (Screen/Text),Custom 1-Pass ABR+VBV,libx264,11.94,2.51,75.4,360.0,3.43,-42.89,0.999917,64.95789,Single-pass bitrate constrained
+Target Size Accuracy (Screen/Text),Custom 1-Pass CRF+VBV Cap,libx264,11.3,2.65,79.6,360.0,1.14,-80.98,0.999404,55.741251,Quality floor with ceiling cap
+Rate-Distortion Codec Comparison,libx264 veryfast CRF20,libx264,27.97,1.07,32.2,370.0,83.73,0.0,0.827941,36.261188,"Preset: veryfast, CRF: 20"
+Rate-Distortion Codec Comparison,libx264 veryfast CRF23,libx264,22.17,1.35,40.6,370.0,36.09,0.0,0.800102,35.322804,"Preset: veryfast, CRF: 23"
+Rate-Distortion Codec Comparison,libx264 veryfast CRF26,libx264,17.71,1.69,50.8,370.0,14.98,0.0,0.796006,34.82834,"Preset: veryfast, CRF: 26"
+Rate-Distortion Codec Comparison,libx264 veryfast CRF29,libx264,19.72,1.52,45.6,370.0,8.55,0.0,0.79606,34.338171,"Preset: veryfast, CRF: 29"
+Rate-Distortion Codec Comparison,libx264 faster CRF23,libx264,37.99,0.79,23.7,370.0,31.49,0.0,0.806546,35.71601,"Preset: faster, CRF: 23"
+Rate-Distortion Codec Comparison,libx265 superfast CRF24,libx265,40.6,0.74,22.2,370.0,24.67,0.0,0.797736,35.296505,"Preset: superfast, CRF: 24"
+Rate-Distortion Codec Comparison,libx265 superfast CRF27,libx265,36.83,0.81,24.4,370.0,16.27,0.0,0.79588,34.787522,"Preset: superfast, CRF: 27"
+Rate-Distortion Codec Comparison,libx265 superfast CRF30,libx265,34.17,0.88,26.3,370.0,9.63,0.0,0.789799,34.018873,"Preset: superfast, CRF: 30"
+Rate-Distortion Codec Comparison,libx265 faster CRF27,libx265,49.19,0.61,18.3,370.0,15.43,0.0,0.801145,34.988066,"Preset: faster, CRF: 27"
+Rate-Distortion Codec Comparison,libx265 faster CRF30,libx265,43.17,0.69,20.8,370.0,9.32,0.0,0.796355,34.329828,"Preset: faster, CRF: 30"
+Rate-Distortion Codec Comparison,libx265 medium CRF28,libx265,74.29,0.4,12.1,370.0,12.35,0.0,0.801242,34.914286,"Preset: medium, CRF: 28"
+Adaptive Resolution (Screen),1080p (No scale),libx264,10.91,2.75,82.5,360.0,2.15,0.0,0.999801,59.596872,"Bitrate capped at 800kbps, Screen"
+Adaptive Resolution (Screen),720p,libx264,7.22,4.15,124.6,360.0,3.05,0.0,,,"Bitrate capped at 800kbps, Screen"
+Adaptive Resolution (Screen),480p,libx264,5.04,5.95,178.5,360.0,3.12,0.0,,,"Bitrate capped at 800kbps, Screen"
+Adaptive Resolution (Film),1080p (No scale),libx264,23.42,1.28,38.4,360.0,3.26,0.0,0.774898,31.783748,"Bitrate capped at 800kbps, Film"
+Adaptive Resolution (Film),720p,libx264,15.63,1.92,57.6,360.0,3.23,0.0,,,"Bitrate capped at 800kbps, Film"
+Adaptive Resolution (Film),480p,libx264,12.2,2.46,73.8,360.0,3.23,0.0,,,"Bitrate capped at 800kbps, Film"
+Smart Fastpath Remux,Full Transcode (Baseline),libx264,31.72,0.95,28.4,360.0,50.86,0.0,1.0,99.0,Standard re-encode
+Smart Fastpath Remux,Stream Copy (-c copy),copy,0.63,47.43,1422.8,25.0,698.46,0.0,1.0,99.0,"50.1x faster, zero loss"

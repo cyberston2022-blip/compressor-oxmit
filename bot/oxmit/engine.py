@@ -20,7 +20,7 @@ from aiogram.types import (BotCommand, BotCommandScopeChat, FSInputFile,
 
 from . import archive as archive_mod
 from . import audit as audit_mod
-from . import dedup, media as media_mod
+from . import decision_engine, dedup, media as media_mod
 from .config import Settings
 from .encore_client import EncoreClient, EncoreError, EncoreNotFound
 from .log import get_logger
@@ -1012,6 +1012,30 @@ class JobEngine:
                     await self.db.bump("dedup_inflight_joined")
                     return {"outcome": "joined", "job_id": str(inflight["id"])}
 
+                # Adaptive Decision Engine: Smart fastpath, dynamic preset & rate control
+                dec = decision_engine.make_decision(
+                    probe=probe,
+                    profile_key=profile_key,
+                    size_bytes=size_bytes,
+                    target_mb=target_mb,
+                    compress_level=compress_level,
+                    settings=self.cfg,
+                    active_jobs=1,
+                )
+                if dec.action == "remux_only":
+                    effective_profile = "remux"
+                    profile_params = None
+                elif profile_key in ("r1080", "r720", "r480"):
+                    effective_profile = resolve_variant(profile_key, probe.get("width"), probe.get("height"))
+                elif profile_key == "custom" and dec.two_pass:
+                    effective_profile = "custom_2pass"
+                    if dec.profile_params:
+                        profile_params = dec.profile_params
+                else:
+                    effective_profile = dec.effective_profile
+                    if dec.profile_params:
+                        profile_params = dec.profile_params
+
                 job_id = await conn.fetchval(
                     """
                     INSERT INTO jobs(requester_tg_id, media_id, profile, profile_version,
@@ -1023,7 +1047,7 @@ class JobEngine:
                     RETURNING id
                     """,
                     tg_id, media_id, profile_key, version,
-                    resolve_variant(profile_key, probe.get("width"), probe.get("height")),
+                    effective_profile,
                     "deferred" if deferred_need else "queued",
                     size_bytes, stable_path, source_msg_id, status_msg_id,
                     "deferred" if deferred_need else "queued",

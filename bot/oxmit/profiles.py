@@ -44,6 +44,8 @@ PROFILES: list[Profile] = [
             "Scale to 480p (no upscale)", max_short_side=480, target_width=854),
     Profile("custom", "custom", "Custom target size", "حجم دلخواه",
             "Target bitrate computed from the requested output size"),
+    Profile("custom_2pass", "custom_2pass", "Custom 2-pass", "حجم دلخواه ۲-پاس",
+            "Target bitrate with strict 2-pass ABR"),
     Profile("remux", "remux", "Fast remux (no re-encode)", "remux سریع",
             "Container shift to MP4+faststart, stream copy - seconds not minutes"),
 ]
@@ -52,14 +54,15 @@ PROFILES: list[Profile] = [
 ESTIMATE_PARAMS = {
     "level": ("h264", 23, "faster", None),
     "level265": ("hevc", 33, "superfast", None),
-    "balanced": ("h264", 22, "faster", None),
+    "balanced": ("h264", 22, "veryfast", None),
     "highq": ("h264", 19, "faster", None),
     "small": ("hevc", 27, "faster", None),
-    "maxcomp": ("hevc", 30, "medium", None),
+    "maxcomp": ("hevc", 30, "superfast", None),
     "tgcompat": ("h264", 22, "veryfast", None),
     "r1080": ("h264", 22, "faster", 1080),
     "r720": ("h264", 23, "faster", 720),
     "r480": ("h264", 23, "faster", 480),
+    "custom_2pass": ("h264", 23, "faster", None),
 }
 
 BY_KEY = {p.key: p for p in PROFILES}

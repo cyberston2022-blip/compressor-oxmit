@@ -8,8 +8,9 @@ encodes:
     height: null
     twoPass: false
     params:
-      crf: "27"
-      preset: faster
+      crf: "#{profileParams['crf'] ?: '27'}"
+      preset: "#{profileParams['preset'] ?: 'faster'}"
+      threads: "#{profileParams['threads'] ?: '6'}"
       pix_fmt: yuv420p
       movflags: "+faststart"
     audioEncode:

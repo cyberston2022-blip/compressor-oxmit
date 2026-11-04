@@ -1,17 +1,18 @@
 name: custom
-description: "Custom target-size profile - video bitrate supplied via profileParams (bv/mr/bs); two-pass for accurate target adherence"
+description: "Custom target-size profile - single-pass ABR + VBV for fast target adherence"
 scaling: bicubic
 encodes:
   - type: X264Encode
     suffix: ""
     width: null
     height: null
-    twoPass: true
+    twoPass: false
     params:
       b:v: "#{profileParams['bv'] ?: '2000k'}"
       maxrate: "#{profileParams['mr'] ?: '3000k'}"
       bufsize: "#{profileParams['bs'] ?: '6000k'}"
-      preset: faster
+      preset: "#{profileParams['preset'] ?: 'faster'}"
+      threads: "#{profileParams['threads'] ?: '6'}"
       pix_fmt: yuv420p
       movflags: "+faststart"
     audioEncode:
