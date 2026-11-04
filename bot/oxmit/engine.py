@@ -198,10 +198,16 @@ class JobEngine:
             log.exception("copy progress reporter failed", extra={"job_id": job_id})
 
     def spawn(self, coro) -> None:
-        """create_task with a strong reference (unreferenced tasks can be GC'd)."""
+        """create_task with a strong reference and unhandled exception logging."""
         task = asyncio.create_task(coro)
         self._bg_tasks.add(task)
-        task.add_done_callback(self._bg_tasks.discard)
+        def _on_done(t: asyncio.Task) -> None:
+            self._bg_tasks.discard(t)
+            if not t.cancelled():
+                exc = t.exception()
+                if exc:
+                    log.error("unhandled exception in spawned task", exc_info=exc)
+        task.add_done_callback(_on_done)
 
     # ------------------------------------------------------------------
     # helpers
@@ -1418,6 +1424,9 @@ class JobEngine:
         await self.db.execute(
             "UPDATE media_assets SET sha256 = $2 WHERE id = $1", row["media_id"], sha
         )
+        await self.db.execute(
+            "UPDATE jobs SET source_path = $2 WHERE id = $1", row["id"], str(stable)
+        )
         return stable
 
     def _callback_sig(self, job_id: str) -> str:
@@ -2548,6 +2557,9 @@ class JobEngine:
             await asyncio.to_thread(_rm, Path(self.cfg.media_incoming) / job_id)
         if not keep_output:
             await asyncio.to_thread(_rm, Path(self.cfg.media_out) / job_id)
+        thumb_path = Path(self.cfg.media_tmp) / f"thumb-{job_id[:12]}.jpg"
+        if thumb_path.is_file():
+            await asyncio.to_thread(thumb_path.unlink, True)
 
     async def cleanup_sweep(self) -> None:
         active = await self.db.fetch(

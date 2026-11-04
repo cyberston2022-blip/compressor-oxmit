@@ -866,6 +866,8 @@ def build_router(engine, db, cfg, state) -> Router:
     # ------------------------------------------------------------------
     def _has_pending(mode: str):
         async def _filter(message: Message) -> bool:
+            if not message.from_user:
+                return False
             pending = pending_mode.get(message.from_user.id)
             return bool(pending) and pending[0] == mode and time.time() - pending[1] < 600
         return _filter

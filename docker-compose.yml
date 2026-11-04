@@ -26,6 +26,11 @@ services:
     volumes:
       - redis_data:/data
     networks: [internal]
+    # 8.5MB actual usage; 512mb internal cap + AOF/fragmentation overhead.
+    deploy:
+      resources:
+        limits:
+          memory: 768M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -44,6 +49,11 @@ services:
     volumes:
       - pg_data:/var/lib/postgresql/data
     networks: [internal]
+    # 38MB actual usage; 512M is ~13x headroom for this DB size.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -71,6 +81,11 @@ services:
       - ${MEDIA_HOST_DIR}:/media
     ports:
       - "127.0.0.1:8080:8080"
+    # 57MB idle; Spring/JVM can spike 2-3x under activity.
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     depends_on:
       redis:
         condition: service_healthy
@@ -138,6 +153,12 @@ services:
     volumes:
       - botapi_data:/var/lib/telegram-bot-api
     networks: [internal]
+    # 31MB idle; tdlib buffers large (up to 2000MB) transfers — raise to 2G
+    # if this container is ever OOMKilled.
+    deploy:
+      resources:
+        limits:
+          memory: 1G
     healthcheck:
       test: ["CMD-SHELL", "timeout 3 bash -c '</dev/tcp/127.0.0.1/8081' || exit 1"]
       interval: 15s

@@ -293,4 +293,4 @@ async def start_internal_api(engine, db, cfg, state, redis_client=None,
     await panel_site.start()
     log.info("panel site started on 0.0.0.0:8081",
              extra={"detail": "tls" if ssl_ctx else "http"})
-    return runner
+    return runner, panel_runner

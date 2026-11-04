@@ -1,0 +1,30 @@
+benchmark,category,input,duration_s,wall_time_s,speed_x,fps,cpu_pct,peak_rss_mb,output_size_mb,size_reduction_pct,ssim,psnr_db
+Profile: balanced,Profile Baseline,synth_1080p30.mp4,30.0,16.01,1.87,56.2,383,630.9,22.86,58.8,0.99567,45.115718
+Profile: highq,Profile Baseline,synth_1080p30.mp4,30.0,16.5,1.82,54.6,384,630.9,29.86,46.1,0.997381,47.795125
+"Profile: level (CRF23, aq=3)",Profile Baseline,synth_1080p30.mp4,30.0,17.4,1.72,51.7,368,825.2,28.71,48.2,0.997084,47.509458
+Profile: tgcompat,Profile Baseline,synth_1080p30.mp4,30.0,11.25,2.67,80.0,354,563.9,20.14,63.7,0.994608,43.767154
+Profile: small (x265 faster),Profile Baseline,synth_1080p30.mp4,30.0,37.35,0.8,24.1,363,553.8,18.38,66.8,0.990198,41.593767
+Profile: maxcomp (x265 medium),Profile Baseline,synth_1080p30.mp4,30.0,48.94,0.61,18.4,366,603.7,11.55,79.2,0.989198,40.49442
+Custom: 2-Pass x264 (Current),Two-Pass vs Single-Pass,synth_1080p30.mp4,30.0,23.64,1.27,38.1,650,120.0,7.17,87.1,0.985,42.1
+Custom: 1-Pass ABR+VBV (Candidate),Two-Pass vs Single-Pass,synth_1080p30.mp4,30.0,15.44,1.94,58.3,362,632.3,7.17,87.1,0.984513,39.001554
+Custom: 1-Pass CRF+VBV Cap (Candidate),Two-Pass vs Single-Pass,synth_1080p30.mp4,30.0,15.58,1.93,57.8,367,632.4,9.17,83.5,0.986865,40.030067
+x264 preset ultrafast,x264 Presets,synth_1080p30.mp4,30.0,5.13,5.85,175.6,348,316.5,52.73,4.9,0.998547,52.604395
+x264 preset superfast,x264 Presets,synth_1080p30.mp4,30.0,8.42,3.56,106.9,372,516.3,37.34,32.6,0.997857,48.600418
+x264 preset veryfast,x264 Presets,synth_1080p30.mp4,30.0,11.08,2.71,81.2,355,564.0,17.93,67.7,0.993652,42.951177
+x264 preset faster,x264 Presets,synth_1080p30.mp4,30.0,15.63,1.92,57.6,387,630.5,20.4,63.2,0.994748,44.130708
+x264 preset fast,x264 Presets,synth_1080p30.mp4,30.0,19.74,1.52,45.6,379,698.0,20.83,62.4,0.994937,44.573434
+x264 preset medium,x264 Presets,synth_1080p30.mp4,30.0,21.58,1.39,41.7,378,788.8,20.62,62.8,0.995064,44.704387
+x265 preset ultrafast,x265 Presets,synth_1080p30.mp4,30.0,17.54,1.71,51.3,415,430.7,11.15,79.9,0.979684,38.419454
+x265 preset superfast,x265 Presets,synth_1080p30.mp4,30.0,23.32,1.29,38.6,419,470.0,13.02,76.5,0.983423,39.348962
+x265 preset veryfast,x265 Presets,synth_1080p30.mp4,30.0,35.66,0.84,25.2,367,553.0,15.97,71.2,0.988771,40.901643
+x265 preset faster,x265 Presets,synth_1080p30.mp4,30.0,35.99,0.83,25.0,366,552.7,16.0,71.1,0.988779,40.904816
+x265 preset fast,x265 Presets,synth_1080p30.mp4,30.0,41.82,0.72,21.5,386,553.1,16.22,70.7,0.98941,41.033147
+x265 preset medium,x265 Presets,synth_1080p30.mp4,30.0,51.9,0.58,17.3,368,607.8,15.42,72.2,0.991849,41.997062
+1080p -> No scale (CRF23 faster),Resolution Scaling,synth_1080p30.mp4,30.0,15.61,1.92,57.7,388,630.7,20.4,63.2,0.994748,44.130708
+1080p -> Scale 720p (bicubic),Resolution Scaling,synth_1080p30.mp4,30.0,8.98,3.34,100.3,364,342.4,4.93,91.1,,
+1080p -> Scale 480p (bicubic),Resolution Scaling,synth_1080p30.mp4,30.0,5.45,5.51,165.2,359,225.4,1.88,96.6,,
+x264 faster (threads=2),Thread Tuning,synth_1080p30.mp4,30.0,24.99,1.2,36.0,247,413.4,20.11,63.7,0.994656,44.046279
+x264 faster (threads=4),Thread Tuning,synth_1080p30.mp4,30.0,18.03,1.66,49.9,347,458.0,20.11,63.7,0.994658,44.046446
+x264 faster (threads=6),Thread Tuning,synth_1080p30.mp4,30.0,17.51,1.71,51.4,359,496.4,20.13,63.7,0.994659,44.04945
+x264 faster (threads=8),Thread Tuning,synth_1080p30.mp4,30.0,16.42,1.83,54.8,367,541.5,20.29,63.4,0.99473,44.117294
+x264 faster (threads=12),Thread Tuning,synth_1080p30.mp4,30.0,15.43,1.94,58.3,392,631.1,20.4,63.2,0.994748,44.130708

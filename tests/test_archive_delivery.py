@@ -1,0 +1,102 @@
+"""Tests for archive captions, flood safety, and delivery fallback chain."""
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter
+
+from oxmit.archive import build_caption, deliver_result, flood_safe
+
+
+def test_build_caption_formatting():
+    probe = {
+        "width": 1920,
+        "height": 1080,
+        "vcodec": "h264",
+        "acodec": "aac",
+        "duration_s": 3665,
+    }
+    cap = build_caption("my_video.mp4", "Balanced", probe, 100_000_000, 40_000_000, "abc12345")
+    assert "my_video.mp4" in cap
+    assert "1920×1080" in cap
+    assert "H264/AAC" in cap
+    assert "1:01:05" in cap
+    assert "abc12345" in cap
+    assert "-60%" in cap
+
+
+@pytest.mark.asyncio
+async def test_flood_safe_retries_once():
+    calls = 0
+
+    async def _action():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TelegramRetryAfter(method=MagicMock(), message="flood", retry_after=0.01)
+        return "success"
+
+    res = await flood_safe(_action)
+    assert res == "success"
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_deliver_result_forward_success():
+    engine = MagicMock()
+    msg = MagicMock()
+    msg.message_id = 999
+    engine.bot.forward_message = AsyncMock(return_value=msg)
+
+    ok, method, mid = await deliver_result(
+        engine,
+        chat_id=123,
+        archive_message_id=456,
+        archive_channel_id=-100123,
+    )
+    assert ok is True
+    assert method == "forward"
+    assert mid == 999
+    engine.bot.forward_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deliver_result_fallback_to_file_id_when_forward_not_found():
+    engine = MagicMock()
+    engine.bot.forward_message = AsyncMock(
+        side_effect=TelegramBadRequest(method=MagicMock(), message="message to forward not found")
+    )
+    msg = MagicMock()
+    msg.message_id = 888
+    engine.bot.send_video = AsyncMock(return_value=msg)
+
+    ok, method, mid = await deliver_result(
+        engine,
+        chat_id=123,
+        archive_message_id=456,
+        archive_channel_id=-100123,
+        file_id="tg-file-123",
+    )
+    assert ok is True
+    assert method == "file_id"
+    assert mid == 888
+    engine.bot.send_video.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deliver_result_as_document():
+    engine = MagicMock()
+    msg = MagicMock()
+    msg.message_id = 777
+    engine.bot.send_document = AsyncMock(return_value=msg)
+
+    ok, method, mid = await deliver_result(
+        engine,
+        chat_id=123,
+        file_id="tg-file-doc",
+        as_document=True,
+    )
+    assert ok is True
+    assert method == "doc_file_id"
+    assert mid == 777
+    engine.bot.send_document.assert_awaited_once()

@@ -107,10 +107,7 @@ async def test_retry_user_job_below_limit_increments_and_guards(
         "the UPDATE must stay conditional on status='failed'"
 
 
-test_retry_user_job_below_limit_increments_and_guards = pytest.mark.xfail(
-    reason="pending F2 fix: retry_user_job does not increment retries yet",
-    strict=False,
-)(test_retry_user_job_below_limit_increments_and_guards)
+# F2 verified and passing
 
 
 # ---------------------------------------------------------------------------
@@ -206,8 +203,4 @@ async def test_stage_recopies_on_size_mismatch(staging_env):
         "F4: size-mismatched staged file must be re-copied from the source")
 
 
-test_stage_recopies_on_size_mismatch = pytest.mark.xfail(
-    reason="pending F4 fix: _stage_source reuses any existing staged file "
-           "without verifying its size",
-    strict=False,
-)(test_stage_recopies_on_size_mismatch)
+# F4 verified and passing

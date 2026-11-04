@@ -342,8 +342,10 @@ def remux_to_mp4(src: str | Path, dst: str | Path,
     try:
         proc = sp.run(cmd, capture_output=True, timeout=timeout)
     except sp.TimeoutExpired as exc:
+        Path(dst).unlink(missing_ok=True)
         raise MediaError("remux timeout") from exc
     if proc.returncode != 0 or not Path(dst).is_file():
+        Path(dst).unlink(missing_ok=True)
         raise MediaError(f"remux failed: {redact((proc.stderr or b'').decode(errors='replace')[:200])}")
 
 
@@ -360,7 +362,10 @@ def download_thumbnail(src: str | Path, dst: str | Path) -> bool:
         "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "7", str(dst),
     ]
     proc = sp.run(cmd, capture_output=True, timeout=60)
-    return proc.returncode == 0 and Path(dst).is_file()
+    if proc.returncode != 0 or not Path(dst).is_file():
+        Path(dst).unlink(missing_ok=True)
+        return False
+    return True
 
 
 def extract_thumbnail(video: str | Path, dst: str | Path, at_seconds: float) -> bool:
@@ -379,4 +384,7 @@ def extract_thumbnail(video: str | Path, dst: str | Path, at_seconds: float) -> 
         "-q:v", "7", str(dst),
     ]
     proc = sp.run(cmd, capture_output=True, timeout=120)
-    return proc.returncode == 0 and Path(dst).is_file()
+    if proc.returncode != 0 or not Path(dst).is_file():
+        Path(dst).unlink(missing_ok=True)
+        return False
+    return True

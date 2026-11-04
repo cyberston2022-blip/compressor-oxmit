@@ -129,7 +129,7 @@ async def main() -> None:
         extra={"detail": f"@{state.bot_username} archive={state.archive_channel_id}"},
     )
 
-    await start_internal_api(engine, db, cfg, state, redis_client, port=8080)
+    api_runners = await start_internal_api(engine, db, cfg, state, redis_client, port=8080)
 
     intake_router = intake.build_router(engine, db, cfg, state)
     adminpanel_router = adminpanel.build_router(engine, db, cfg, state)
@@ -160,6 +160,20 @@ async def main() -> None:
             allowed_updates=["message", "callback_query", "channel_post"],
         )
     finally:
+        for t in background:
+            t.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
+        if 'api_runners' in locals() and api_runners:
+            for r in api_runners:
+                try:
+                    await r.cleanup()
+                except Exception:
+                    pass
+        if bot and bot.session:
+            try:
+                await bot.session.close()
+            except Exception:
+                pass
         await encre.aclose()
         await redis_client.aclose()
         await db.close()
