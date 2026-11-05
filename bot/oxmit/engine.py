@@ -253,12 +253,12 @@ class JobEngine:
         """Default command list for everyone + an admin-scoped list (with
         /admin and /panel) for every admin's private chat."""
         try:
-            base = [BotCommand(command="start", description="شروع / Start"),
-                    BotCommand(command="settings", description="⚙️ تنظیمات / Settings")]
+            base = [BotCommand(command="start", description="???????? / Start"),
+                    BotCommand(command="settings", description="?????? ?????????????? / Settings")]
             await self.bot.set_my_commands(base)
             admin_cmds = base + [
-                BotCommand(command="admin", description="🎛 پنل ادمین / Admin panel"),
-                BotCommand(command="panel", description="🌐 پنل وب / Web panel"),
+                BotCommand(command="admin", description="???? ?????? ?????????? / Admin panel"),
+                BotCommand(command="panel", description="???? ?????? ???? / Web panel"),
             ]
             for aid in await self.admin_ids():
                 await self.bot.set_my_commands(
@@ -429,8 +429,8 @@ class JobEngine:
         except TelegramAPIError:
             pass
 
-    _STAGES = [("recv", "📥"), ("queued", "🧾"), ("copy", "📋"), ("encode", "⚙️"),
-               ("validate", "🔍"), ("archive", "📤"), ("deliver", "📬")]
+    _STAGES = [("recv", "????"), ("queued", "????"), ("copy", "????"), ("encode", "??????"),
+               ("validate", "????"), ("archive", "????"), ("deliver", "????")]
 
     def _stage_index(self, row) -> int:
         """0-based index of the current pipeline stage (7 = all done)."""
@@ -445,9 +445,9 @@ class JobEngine:
         cur = self._stage_index(row)
         parts = []
         for i, (_key, icon) in enumerate(self._STAGES):
-            mark = "✅" if i < cur else ("⏳" if i == cur else "　")
+            mark = "???" if i < cur else ("???" if i == cur else "???")
             parts.append(icon + mark)
-        return "→".join(parts)
+        return "???".join(parts)
 
     def _progress_text(self, row, lang: str, info: dict | None = None) -> str:
         info = info or {}
@@ -488,7 +488,7 @@ class JobEngine:
         if info and info.get("speed"):
             speed_txt = " " + tr("status_speed", lang, speed=f"{info['speed']:.1f}")
         filled = round(progress / 5)
-        bar = "▰" * filled + "▱" * (20 - filled)
+        bar = "???" * filled + "???" * (20 - filled)
         header = tr("status_header", lang, job=str(row["id"])[:8], profile=row["profile"])
         line = tr("status_line", lang, stage=tr(stage_key, lang), progress=progress,
                   elapsed=elapsed, eta=eta + speed_txt)
@@ -742,7 +742,7 @@ class JobEngine:
             await self.db.set_config("paused", True)
             log.warning("auto-paused: disk below critical threshold")
             await self.notify_admins(
-                f"⚠️ Disk below critical threshold; intake paused. "
+                f"?????? Disk below critical threshold; intake paused. "
                 f"Free: {media_mod.human_size(self._disk_free())}"
             )
 
@@ -751,7 +751,7 @@ class JobEngine:
             self.state.paused = False
             await self.db.set_config("paused", False)
             log.info("auto-resumed: disk recovered")
-            await self.notify_admins("▶️ Disk recovered; service resumed.")
+            await self.notify_admins("?????? Disk recovered; service resumed.")
 
     # ------------------------------------------------------------------
     # submission
@@ -1333,7 +1333,7 @@ class JobEngine:
             # The source lives on the bot-api volume (hashed in place at
             # registration). Its absolute path contains the bot token, so it
             # must never be handed to Encore (which logs the full ffmpeg
-            # command at INFO) — _stage_source aliases it into /media.
+            # command at INFO) ??? _stage_source aliases it into /media.
             used_path = await self._stage_source(job_id, source, row["filename"])
 
             await self._set_stage(job_id, "copying")
@@ -2365,13 +2365,25 @@ class JobEngine:
             "SELECT tg_file_id FROM media_assets WHERE id = $1", output_media_id
         ) if output_media_id else None
         src_asset = await self.db.fetchrow(
-            "SELECT tg_file_id FROM media_assets WHERE id = $1", row["media_id"]
+            "SELECT tg_file_id, width, height, duration_s, vcodec, acodec, probe FROM media_assets WHERE id = $1", row["media_id"]
         )
         source_size = row["source_size"] or 0
         started = row["started_at"]
-        completed = row["completed_at"]
+        completed = row["completed_at"] or _utcnow()
         filename = await self._media_filename(row)
         out_probe = out_probe or {}
+        if no_gain and src_asset:
+            effective_probe = dict(src_asset.get("probe") or {})
+            if not effective_probe:
+                effective_probe = {
+                    "width": src_asset.get("width"),
+                    "height": src_asset.get("height"),
+                    "duration_s": src_asset.get("duration_s"),
+                    "vcodec": src_asset.get("vcodec"),
+                    "acodec": src_asset.get("acodec"),
+                }
+        else:
+            effective_probe = out_probe
 
         for r in reqs:
             lang = await self._lang(r["tg_id"])
@@ -2379,7 +2391,7 @@ class JobEngine:
             summary = self._summary_text(
                 lang, job_id=str(row["id"]), profile=row["profile"], filename=filename,
                 source_size=source_size, output_size=out_size or source_size,
-                probe=out_probe if not no_gain else {},
+                probe=effective_probe,
                 started=started, completed=completed,
                 new=not row["reuse_of"], no_gain=no_gain,
             )
@@ -2607,7 +2619,7 @@ class JobEngine:
                     continue  # stable media copy still needed by an active job
                 try:
                     if entry.stat().st_mtime < cutoff:
-                        # rmtree silently no-ops on plain files — delete them
+                        # rmtree silently no-ops on plain files ??? delete them
                         # explicitly (BUG-002: media/test leaked test files).
                         if entry.is_dir() and not entry.is_symlink():
                             await asyncio.to_thread(shutil.rmtree, entry, ignore_errors=True)
@@ -2645,3 +2657,4 @@ def redeliver_markup(job_id: str, lang: str = "fa") -> InlineKeyboardMarkup:
             text=tr("btn_redeliver", lang), callback_data=f"rdl:{job_id}"
         )]]
     )
+

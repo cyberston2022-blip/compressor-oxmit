@@ -267,7 +267,6 @@ def test_make_decision_educational_mode():
     assert dec_480.target_width == 640
     assert dec_480.target_height == 360
     assert "unsharp" in dec_480.scale_filter
-    assert "unsharp" in dec_480.profile_params.get("vf", "")
     assert dec_480.profile_params["preset"] == "veryfast"
     assert dec_480.profile_params["crf"] == "26"
     assert dec_480.profile_params["audio_bitrate"] == "48k"
@@ -357,8 +356,6 @@ def test_make_decision_rostam():
     assert dec.target_height == 360
     assert dec.profile_params["crf"] == "32"
     assert dec.profile_params["preset"] == "superfast"
-    assert "hqdn3d" in dec.profile_params["vf"]
-    assert "unsharp" in dec.profile_params["vf"]
     assert dec.profile_params["audio_bitrate"] == "32k"
 
 

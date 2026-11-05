@@ -439,8 +439,6 @@ def make_decision(
             "preset": preset,
             "audio_bitrate": audio_br,
         }
-        if scale_filter and "unsharp" in scale_filter:
-            profile_params["vf"] = "unsharp=5:5:0.8:3:3:0.0"
 
         # Voice audio optimization: always re-encode to low-bitrate AAC speech
         audio_action = "encode"
@@ -461,7 +459,6 @@ def make_decision(
             "crf": "32",
             "preset": "superfast",
             "audio_bitrate": "32k",
-            "vf": "unsharp=5:5:0.8:3:3:0.0,hqdn3d=2.0:1.5:3.0:2.5",
         }
         chosen_profile = "rostam"
         audio_action = "encode"
@@ -491,3 +488,4 @@ def make_decision(
         content_category=content_cat,
         rationale=rationale,
     )
+
