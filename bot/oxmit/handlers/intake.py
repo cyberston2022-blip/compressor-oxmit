@@ -21,7 +21,9 @@ from aiogram.types import (
 
 from .. import forcesub
 from .. import media as media_mod
+from ..decision_engine import is_already_compressed, select_educational_resolution
 from ..engine import AdmissionError, _as_uuid
+from ..estimate import estimate_output_bytes
 from ..log import get_logger
 from ..media import human_size
 from ..profiles import BY_KEY, PROFILES
@@ -307,26 +309,218 @@ def build_router(engine, db, cfg, state) -> Router:
             kind=kind,
         )
 
+        # --- Pre-analysis: Check if already compressed ---
+        probe_dict = {
+            "width": pick.width,
+            "height": pick.height,
+            "duration_s": pick.duration,
+            "bitrate": int(pick.size * 8 / pick.duration) if (pick.duration and pick.size) else 0,
+        }
+        already_comp, comp_reason = is_already_compressed(probe_dict, pick.size)
+
+        if already_comp:
+            percent_pending.pop(pick.tg_id, None)
+            video_pending[pick.tg_id] = pick
+            warn_card = tr("already_compressed_warning", lang, reason=comp_reason)
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=tr("btn_rostam", lang), callback_data="cmp:rostam")],
+                [InlineKeyboardButton(text=tr("btn_send_original", lang), callback_data="cmp:remux")],
+                [InlineKeyboardButton(text=tr("btn_cancel_job", lang), callback_data="cmp:stop")],
+            ])
+            await message.answer(f"{card}\n\n{warn_card}", reply_markup=kb)
+            return
+
+        # --- Dynamic predictions for Glass Panel ---
+        tw480, th480, _ = select_educational_resolution(pick.width or 1920, pick.height or 1080)
+        tw480, th480 = (tw480 or 854), (th480 or 480)
+        out_pix_480 = float(tw480 * th480)
+        dur = pick.duration or 60.0
+        low_480, high_480 = estimate_output_bytes(
+            dur, out_pix_480, "h264", 25, audio_kbps=64.0, source_bytes=pick.size
+        )
+        mid_480 = (low_480 + high_480) / 2 if high_480 > 0 else (pick.size * 0.3)
+        cut_480 = max(10, min(95, round((1.0 - mid_480 / pick.size) * 100))) if pick.size > 0 else 75
+        mb_480 = max(1, round(mid_480 / (1024 * 1024)))
+
+        tw360, th360 = (640, 360) if min(pick.width or 1920, pick.height or 1080) > 360 else (pick.width or 640, pick.height or 360)
+        out_pix_360 = float(tw360 * th360)
+        low_360, high_360 = estimate_output_bytes(
+            dur, out_pix_360, "h264", 26, audio_kbps=48.0, source_bytes=pick.size
+        )
+        mid_360 = (low_360 + high_360) / 2 if high_360 > 0 else (pick.size * 0.18)
+        cut_360 = max(15, min(97, round((1.0 - mid_360 / pick.size) * 100))) if pick.size > 0 else 85
+        mb_360 = max(1, round(mid_360 / (1024 * 1024)))
+
+        btn_480_text = tr("btn_edu480", lang, cut=cut_480, mb=mb_480)
+        btn_360_text = tr("btn_edu360", lang, cut=cut_360, mb=mb_360)
+        btn_cust_text = tr("btn_custom_target", lang)
+        btn_level_text = tr("btn_compress", lang) + " (درجه ۱-۲۰)"
+
+        panel_kb = [
+            [InlineKeyboardButton(text=btn_480_text, callback_data="cmp:edu480")],
+            [InlineKeyboardButton(text=btn_360_text, callback_data="cmp:edu360")],
+            [InlineKeyboardButton(text=btn_cust_text, callback_data="cmp:cust_prompt")],
+            [InlineKeyboardButton(text=btn_level_text, callback_data="cmp:go")],
+        ]
+
         if admin_user:
             percent_pending.pop(pick.tg_id, None)
-            video_pending[pick.tg_id] = pick  # also powers the level button
+            video_pending[pick.tg_id] = pick
             key = _register_pending(pick)
             kb = _kb_profile_grid("pk", key, lang)
-            kb.inline_keyboard.insert(0, [InlineKeyboardButton(
-                text=tr("btn_compress", lang) + " (درجه)", callback_data="cmp:go")])
-            await message.answer(card + "\n\n" + tr("choose_profile_for", lang),
-                                 reply_markup=kb)
+            for row in reversed(panel_kb):
+                kb.inline_keyboard.insert(0, row)
+            await message.answer(card + "\n\n" + tr("choose_profile_for", lang), reply_markup=kb)
             return
 
         percent_pending.pop(pick.tg_id, None)
         video_pending[pick.tg_id] = pick
         await message.answer(
             card + "\n\n" + tr("choose_profile_for", lang),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=tr("btn_compress", lang),
-                                     callback_data="cmp:go"),
-            ]]),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=panel_kb),
         )
+
+    # ---- educational button handlers (480p and 360p) ----
+    @router.callback_query(F.data.in_({"cmp:edu", "cmp:edu480", "cmp:edu360"}))
+    async def on_compress_edu_btn(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        pick = video_pending.get(callback.from_user.id)
+        lang = await engine._lang(callback.from_user.id)
+        if pick is None:
+            await callback.answer(tr("cancel_expired", lang), show_alert=True)
+            return
+        await callback.answer()
+        percent_pending.pop(callback.from_user.id, None)
+        try:
+            await engine.bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=None,
+            )
+        except TelegramAPIError:
+            pass
+        target_prof = "edu360" if callback.data == "cmp:edu360" else "edu480"
+        await submit_now(pick, target_prof)
+
+    # ---- Rostam & Siavash extreme compression handler ----
+    @router.callback_query(F.data == "cmp:rostam")
+    async def on_compress_rostam_btn(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        pick = video_pending.get(callback.from_user.id)
+        lang = await engine._lang(callback.from_user.id)
+        if pick is None:
+            await callback.answer(tr("cancel_expired", lang), show_alert=True)
+            return
+        await callback.answer()
+        percent_pending.pop(callback.from_user.id, None)
+        try:
+            await engine.bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=None,
+            )
+        except TelegramAPIError:
+            pass
+        await submit_now(pick, "rostam")
+
+    # ---- Remux (send original) handler ----
+    @router.callback_query(F.data == "cmp:remux")
+    async def on_compress_remux_btn(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        pick = video_pending.get(callback.from_user.id)
+        lang = await engine._lang(callback.from_user.id)
+        if pick is None:
+            await callback.answer(tr("cancel_expired", lang), show_alert=True)
+            return
+        await callback.answer()
+        percent_pending.pop(callback.from_user.id, None)
+        try:
+            await engine.bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=None,
+            )
+        except TelegramAPIError:
+            pass
+        await submit_now(pick, "remux")
+
+    # ---- custom size prompt handler (for all users) ----
+    @router.callback_query(F.data == "cmp:cust_prompt")
+    async def on_custom_prompt_btn(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        pick = video_pending.get(callback.from_user.id)
+        lang = await engine._lang(callback.from_user.id)
+        if pick is None:
+            await callback.answer(tr("cancel_expired", lang), show_alert=True)
+            return
+        await callback.answer()
+        pending_custom[callback.from_user.id] = (pick, time.time())
+        try:
+            await engine.bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=None,
+            )
+        except TelegramAPIError:
+            pass
+
+        # Quick size choice buttons
+        src_mb = int(pick.size / (1024 * 1024)) if pick.size else 500
+        cands = [50, 100, 200, 400]
+        quick_mbs = [m for m in cands if m < src_mb]
+        if not quick_mbs:
+            quick_mbs = [max(10, src_mb // 2)]
+
+        kb_rows = []
+        quick_row = [
+            InlineKeyboardButton(text=f"{m} MB", callback_data=f"cset:{m}")
+            for m in quick_mbs
+        ]
+        if quick_row:
+            kb_rows.append(quick_row)
+        kb_rows.append([InlineKeyboardButton(text=tr("btn_cancel_job", lang), callback_data="cmp:stop")])
+
+        await callback.message.answer(
+            tr("custom_target_prompt", lang),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
+        )
+
+    # ---- quick custom size selection callback (cset:<mb>) ----
+    @router.callback_query(F.data.startswith("cset:"))
+    async def on_custom_quick_set(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        target_mb_str = callback.data.split(":", 1)[1]
+        try:
+            target_mb = int(target_mb_str)
+        except ValueError:
+            await callback.answer()
+            return
+        entry = pending_custom.pop(callback.from_user.id, None)
+        pick = entry[0] if entry else video_pending.get(callback.from_user.id)
+        lang = await engine._lang(callback.from_user.id)
+        if pick is None:
+            await callback.answer(tr("cancel_expired", lang), show_alert=True)
+            return
+        await callback.answer()
+        try:
+            await engine.bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=None,
+            )
+        except TelegramAPIError:
+            pass
+        await submit_now(pick, "custom", target_mb=target_mb)
 
     # ---- compress button -> ask for the compression level ----
     @router.callback_query(F.data == "cmp:go")

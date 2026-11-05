@@ -16,6 +16,68 @@ T: dict[str, dict[str, str]] = {
         ),
     },
     "btn_compress": {"fa": "🎬 فشرده‌سازی", "en": "🎬 Compress"},
+    "btn_edu_compress": {
+        "fa": "🎓 فشرده‌سازی ویدیوی آموزشی (حداقل حجم + ۴۸۰p/۳۶۰p)",
+        "en": "🎓 Educational Video Compression (Lowest size + 480p/360p)",
+    },
+    "btn_edu_compress_cut": {
+        "fa": "🎓 فشرده‌سازی آموزشی ({cut}٪ کاهش حجم! | {res})",
+        "en": "🎓 Educational Compress (~{cut}% cut! | {res})",
+    },
+    "btn_edu480": {
+        "fa": "🟢 سبک: ۴۸۰p آموزشی (~{cut}٪ | ~{mb}MB)",
+        "en": "🟢 Light: 480p Edu (~{cut}% | ~{mb}MB)",
+    },
+    "btn_edu360": {
+        "fa": "🟡 شدید: ۳۶۰p باکیفیت (~{cut}٪ | ~{mb}MB)",
+        "en": "🟡 Extreme: 360p Crisp (~{cut}% | ~{mb}MB)",
+    },
+    "btn_custom_target": {
+        "fa": "🎯 تعیین حجم دستی (سرعت موشکی)",
+        "en": "🎯 Manual Target Size (Rocket Speed)",
+    },
+    "btn_rostam": {
+        "fa": "⚔️ فشرده‌سازی افراطی «رستم و سیاوش»",
+        "en": "⚔️ Rostam & Siavash Extreme Compression",
+    },
+    "btn_send_original": {
+        "fa": "📥 ارسال نسخه اصلی (بدون افت کیفیت)",
+        "en": "📥 Send Original (Direct Stream)",
+    },
+    "already_compressed_warning": {
+        "fa": (
+            "⚠️ **این ویدیو از قبل فشرده شده است!**\n\n"
+            "تحلیل بیت‌ریت و محتوا نشان می‌دهد این فایل قبلاً تا حد زیادی فشرده شده است ({reason}). "
+            "فشرده‌سازی عادی ممکن است حجم آن را کاهش ندهد یا کیفیت متن‌ها را بیهوده تخریب کند.\n\n"
+            "می‌توانید نسخه اصلی را مستقیماً دریافت کنید یا وارد حالت فوق‌متراکم **«رستم و سیاوش»** شوید:"
+        ),
+        "en": (
+            "⚠️ **This video is already heavily compressed!**\n\n"
+            "Bitrate analysis shows this file is already near its entropy floor ({reason}). "
+            "Normal compression may not reduce size or may degrade text clarity unnecessarily.\n\n"
+            "You can keep the original or run **'Rostam & Siavash'** extreme compression:"
+        ),
+    },
+    "custom_target_prompt": {
+        "fa": (
+            "🎯 **تعیین حجم دستی (حالت سرعت موشکی):**\n\n"
+            "یکی از حجم‌های آماده را انتخاب کنید یا یک عدد به مگابایت بفرستید (مثلاً 150):\n\n"
+            "⚡ *اولویت سرعت:* در این حالت برای رسیدن فوری به حجم دلخواه، کیفیت و رزولوشن هوشمندانه بهینه‌سازی شده و پردازش با حداکثر سرعت سرور انجام می‌شود."
+        ),
+        "en": (
+            "🎯 **Manual Target Size (Rocket Speed Mode):**\n\n"
+            "Select a quick size below or send a number in MB (e.g. 150):\n\n"
+            "⚡ *Speed Priority:* Resolution and encoding are adapted to hit your target size at maximum server speed."
+        ),
+    },
+    "rostam_accepted": {
+        "fa": "⚔️ حالت «رستم و سیاوش» فعال شد — ویدیو با رزولوشن ۳۶۰p، فیلتر شارپ متن، نویزگیر زمانی و HEVC فوق‌متراکم فشرده می‌شود.",
+        "en": "⚔️ 'Rostam & Siavash' active — video will be compressed with 360p, text unsharp, denoise and dense HEVC.",
+    },
+    "edu_accepted": {
+        "fa": "🎓 حالت آموزشی فعال شد ({res}) — کار با حداکثر سرعت و حداقل حجم ثبت شد.",
+        "en": "🎓 Educational mode active ({res}) — job queued with maximum speed and lowest size.",
+    },
     "btn_cancel_job": {"fa": "❌ لغو", "en": "❌ Cancel"},
     "level_prompt": {
         "fa": (

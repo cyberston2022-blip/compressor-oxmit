@@ -1,0 +1,19 @@
+name: edu480_hevc
+description: "Educational video HEVC - 480p Lanczos scaling, x265 superfast, voice audio (maximum compression)"
+scaling: lanczos
+encodes:
+  - type: X265Encode
+    suffix: ""
+    width: 854
+    height: null
+    twoPass: false
+    params:
+      crf: "#{profileParams['crf'] ?: '29'}"
+      preset: "#{profileParams['preset'] ?: 'superfast'}"
+      threads: "#{profileParams['threads'] ?: '6'}"
+      pix_fmt: yuv420p
+      movflags: "+faststart"
+    audioEncode:
+      type: AudioEncode
+      codec: aac
+      bitrate: "#{profileParams['audio_bitrate'] ?: '64k'}"

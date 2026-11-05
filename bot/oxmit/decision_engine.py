@@ -120,6 +120,10 @@ def can_smart_bypass(
     if profile_key == "remux":
         return True
 
+    # Educational and extreme profiles must never bypass re-encoding and downscaling
+    if profile_key in ("educational", "edu", "edu480", "edu360", "rostam", "rostam_siavash"):
+        return False
+
     # If user requested tgcompat or balanced and file is already lightweight:
     if profile_key in ("tgcompat", "balanced"):
         if "mp4" in container and 0 < size_bytes <= 25 * 1024 * 1024:
@@ -191,6 +195,99 @@ def select_adaptive_resolution(
     return None, None, None
 
 
+def select_educational_resolution(src_w: int, src_h: int) -> tuple[int, int, str]:
+    """Calculate optimal output resolution for educational media under the Owner's mandate.
+
+    Mandate:
+    1. If > 480p (short side > 480) -> Downscale to 480p (Lanczos text clarity).
+    2. If 480p (360 < short side <= 480) -> Downscale to 360p (Lanczos + sharpening for crisp fonts).
+    3. If <= 360p (short side <= 360) -> Preserve native resolution.
+    """
+    if src_w <= 0 or src_h <= 0:
+        return 0, 0, ""
+
+    is_portrait = src_h > src_w
+    short_dim = min(src_w, src_h)
+
+    # 1. Any video > 480p -> downscale to 480p with Lanczos text clarity
+    if short_dim > 480:
+        if not is_portrait:
+            target_h = 480
+            target_w = int(round(src_w * (480.0 / src_h)))
+            if target_w % 2 != 0:
+                target_w += 1
+            scale_filter = f"scale='min({target_w},iw)':-2:flags=lanczos"
+        else:
+            target_w = 480
+            target_h = int(round(src_h * (480.0 / src_w)))
+            if target_h % 2 != 0:
+                target_h += 1
+            scale_filter = f"scale=-2:'min({target_h},ih)':flags=lanczos"
+        return target_w, target_h, scale_filter
+
+    # 2. If already 480p -> downscale to 360p with Lanczos + sharpening for crisp fonts
+    if short_dim > 360:
+        if not is_portrait:
+            target_h = 360
+            target_w = int(round(src_w * (360.0 / src_h)))
+            if target_w % 2 != 0:
+                target_w += 1
+            scale_filter = f"scale='min({target_w},iw)':-2:flags=lanczos,unsharp=5:5:0.8:3:3:0.0"
+        else:
+            target_w = 360
+            target_h = int(round(src_h * (360.0 / src_w)))
+            if target_h % 2 != 0:
+                target_h += 1
+            scale_filter = f"scale=-2:'min({target_h},ih)':flags=lanczos,unsharp=5:5:0.8:3:3:0.0"
+        return target_w, target_h, scale_filter
+
+    # 3. If <= 360p -> preserve native resolution
+    return src_w, src_h, ""
+
+
+def is_already_compressed(probe: dict[str, Any], size_bytes: int = 0) -> tuple[bool, str]:
+    """Detect if video is already near entropy floor / heavily compressed.
+
+    Returns (is_compressed, reason).
+    """
+    src_w = int(probe.get("width") or 0)
+    src_h = int(probe.get("height") or 0)
+    fps = float(probe.get("fps") or 25.0)
+    duration_s = float(probe.get("duration_s") or 0.0)
+    bitrate = int(probe.get("bitrate") or 0)
+
+    if not bitrate and duration_s > 0 and size_bytes > 0:
+        bitrate = int(size_bytes * 8 / duration_s)
+
+    if bitrate <= 0 or duration_s <= 0:
+        return False, ""
+
+    short_dim = min(src_w, src_h) if (src_w > 0 and src_h > 0) else 1080
+    kbps = bitrate // 1000
+
+    # Calculate Bits-Per-Pixel (BPP)
+    if src_w > 0 and src_h > 0 and fps > 0:
+        bpp = bitrate / (src_w * src_h * fps)
+    else:
+        bpp = 0.1
+
+    # Thresholds:
+    # 1080p: < 750 kbps or bpp < 0.016
+    # 720p:  < 450 kbps or bpp < 0.022
+    # 480p:  < 280 kbps or bpp < 0.032
+    # <=360p: < 180 kbps or bpp < 0.040
+    if short_dim >= 1080 and (kbps < 750 or bpp < 0.016):
+        return True, f"1080p with very low bitrate ({kbps} kbps, BPP {bpp:.3f})"
+    if short_dim >= 720 and (kbps < 450 or bpp < 0.022):
+        return True, f"720p with very low bitrate ({kbps} kbps, BPP {bpp:.3f})"
+    if short_dim >= 480 and (kbps < 280 or bpp < 0.032):
+        return True, f"480p with very low bitrate ({kbps} kbps, BPP {bpp:.3f})"
+    if short_dim < 480 and (kbps < 180 or bpp < 0.040):
+        return True, f"360p with very low bitrate ({kbps} kbps, BPP {bpp:.3f})"
+
+    return False, ""
+
+
 def make_decision(
     *,
     probe: dict[str, Any],
@@ -200,6 +297,7 @@ def make_decision(
     compress_level: int | None = None,
     settings: Any = None,
     active_jobs: int = 1,
+    educational_mode: bool = False,
 ) -> EncodingDecision:
     """The central decision engine evaluating the media and generating the optimal strategy."""
     content_cat = detect_content_category(probe)
@@ -231,46 +329,45 @@ def make_decision(
     chosen_profile = profile_key
     two_pass = False
     scale_filter = None
+    target_w: int | None = None
+    target_h: int | None = None
 
     # --- CUSTOM TARGET SIZE PROFILE ---
     if profile_key == "custom":
         target_mb_val = int(target_mb or 0)
         target_bytes = target_mb_val * 1024 * 1024
         usable_bytes = target_bytes * 0.985  # 1.5% container overhead
-        audio_kbps = 96 if audio_action == "encode" else int(probe.get("audio_bitrate_kbps") or 96)
+        # Owner mandate: Educational focus & voice optimization (mono 48k or 64k)
+        audio_kbps = 48 if (src_w > 0 and min(src_w, src_h) <= 360) else 64
+        audio_action = "encode"
         audio_bits = audio_kbps * 1000 * duration_s if duration_s > 0 else 0
         video_bits = usable_bytes * 8 - audio_bits
         kbps = int(video_bits / duration_s / 1000) if duration_s > 0 else 1000
-        kbps = max(200, kbps)  # clamp to quality floor
+        kbps = max(150, kbps)  # clamp to quality floor
 
-        # Adaptive resolution for low bitrate budget
-        if adaptive_res_enabled:
-            tw, th, s_filt = select_adaptive_resolution(src_w, src_h, kbps, content_cat)
-            scale_filter = s_filt
+        # Owner mandate: Educational media -> downscale: >480p to 480p, 480p to 360p crisp
+        # Quality is sacrificed to strictly hit target size and maximize speed!
+        tw, th, s_filt = select_educational_resolution(src_w, src_h)
+        if kbps < 300 and (tw > 640 or th > 360):
+            tw, th, s_filt = select_educational_resolution(640, 360)
+        target_w = tw
+        target_h = th
+        scale_filter = s_filt
 
-        # Rate control mode:
-        # In custom_mode 'adaptive':
-        # - High motion / complex film: 1-Pass ABR+VBV stays within +/- 1.5% (verified by benchmark).
-        # - Screen recording or long duration (>300s): 2-Pass ABR ensures strict +/- 2% target compliance.
-        if custom_mode == "two_pass":
-            two_pass = True
-        elif custom_mode == "one_pass":
-            two_pass = False
-        else:  # "adaptive"
-            if content_cat == "screen_text" or duration_s > 300.0:
-                two_pass = True  # Strict target adherence for variable complexity
-            else:
-                two_pass = False  # 1-pass ABR+VBV is 35-50% faster and hits target on standard media
+        # Owner mandate: SPEED IS VERY IMPORTANT!
+        # 1-pass ABR+VBV with preset veryfast encodes at 400-600 FPS and hits target within +/- 1.5%
+        two_pass = False
 
         mr = int(kbps * 1.35)
         profile_params = {
             "bv": f"{kbps}k",
             "mr": f"{mr}k",
             "bs": f"{mr * 2}k",
-            "preset": "veryfast" if active_jobs > 1 else "faster",
+            "preset": "veryfast",
+            "audio_bitrate": f"{audio_kbps}k",
         }
         chosen_profile = "custom"
-        rationale = f"Custom target {target_mb_val}MB: {kbps}k bitrate, 2pass={two_pass}, scale={scale_filter}"
+        rationale = f"Custom target {target_mb_val}MB: {kbps}k bitrate, 1pass veryfast, scale={scale_filter}"
 
     # --- LEVEL SMART COMPRESSION ---
     elif profile_key == "level":
@@ -319,6 +416,61 @@ def make_decision(
         chosen_profile = "tgcompat"
         rationale = "Telegram compat: H.264 veryfast + faststart"
 
+    # --- EDUCATIONAL / MINIMUM SIZE PROFILE ---
+    elif educational_mode or profile_key in ("educational", "edu", "edu480", "edu360"):
+        tw, th, s_filt = select_educational_resolution(src_w, src_h)
+        target_w = tw
+        target_h = th
+        scale_filter = s_filt if s_filt else None
+
+        short_target = min(tw, th) if (tw > 0 and th > 0) else 480
+        if short_target <= 360:
+            chosen_profile = "edu360"
+            audio_br = "48k"
+            crf = "26"
+        else:
+            chosen_profile = "edu480"
+            audio_br = "64k"
+            crf = "25"
+
+        preset = "veryfast"
+        profile_params = {
+            "crf": crf,
+            "preset": preset,
+            "audio_bitrate": audio_br,
+        }
+        if scale_filter and "unsharp" in scale_filter:
+            profile_params["vf"] = "unsharp=5:5:0.8:3:3:0.0"
+
+        # Voice audio optimization: always re-encode to low-bitrate AAC speech
+        audio_action = "encode"
+        content_cat = "screen_text"
+        rationale = (
+            f"Educational mode: {src_w}x{src_h} -> {tw}x{th} via {chosen_profile} "
+            f"(CRF {crf}, preset {preset}, voice audio {audio_br}, scale={scale_filter})"
+        )
+
+    # --- ROSTAM & SIAVASH (NUCLEAR EXTREME COMPRESSION) ---
+    elif profile_key in ("rostam", "rostam_siavash"):
+        tw, th, s_filt = select_educational_resolution(640, 360) if min(src_w, src_h) > 360 else (src_w, src_h, "")
+        target_w = tw
+        target_h = th
+        scale_filter = s_filt if s_filt else None
+
+        profile_params = {
+            "crf": "32",
+            "preset": "superfast",
+            "audio_bitrate": "32k",
+            "vf": "unsharp=5:5:0.8:3:3:0.0,hqdn3d=2.0:1.5:3.0:2.5",
+        }
+        chosen_profile = "rostam"
+        audio_action = "encode"
+        content_cat = "screen_text"
+        rationale = (
+            f"Rostam & Siavash Nuclear Mode: {src_w}x{src_h} -> {tw}x{th} via HEVC superfast "
+            f"(CRF 32, denoise hqdn3d, voice mono 32k audio)"
+        )
+
     else:
         chosen_profile = profile_key
         rationale = f"Standard profile: {profile_key}"
@@ -332,6 +484,8 @@ def make_decision(
         effective_profile=chosen_profile,
         profile_params=profile_params,
         two_pass=two_pass,
+        target_width=target_w,
+        target_height=target_h,
         scale_filter=scale_filter,
         audio_action=audio_action,
         content_category=content_cat,

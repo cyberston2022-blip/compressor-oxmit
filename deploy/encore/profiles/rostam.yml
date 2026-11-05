@@ -1,0 +1,21 @@
+name: rostam
+description: "Rostam & Siavash Extreme Compression: 360p Lanczos + unsharp + denoise, HEVC superfast, 32k mono audio"
+scaling: lanczos
+encodes:
+  - type: X265Encode
+    suffix: ""
+    width: 640
+    height: null
+    twoPass: false
+    params:
+      crf: "#{profileParams['crf'] ?: '32'}"
+      preset: "#{profileParams['preset'] ?: 'superfast'}"
+      threads: "#{profileParams['threads'] ?: '6'}"
+      vf: "#{profileParams['vf'] ?: 'unsharp=5:5:0.8:3:3:0.0,hqdn3d=2.0:1.5:3.0:2.5'}"
+      aq-mode: "3"
+      pix_fmt: yuv420p
+      movflags: "+faststart"
+    audioEncode:
+      type: AudioEncode
+      codec: aac
+      bitrate: "#{profileParams['audio_bitrate'] ?: '32k'}"

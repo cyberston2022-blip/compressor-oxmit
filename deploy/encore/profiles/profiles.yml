@@ -10,3 +10,8 @@ custom: custom.yml
 level: level.yml
 level265: level265.yml
 repair: repair.yml
+edu480: edu480.yml
+edu360: edu360.yml
+edu480_hevc: edu480_hevc.yml
+edu360_hevc: edu360_hevc.yml
+rostam: rostam.yml

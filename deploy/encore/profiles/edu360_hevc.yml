@@ -1,0 +1,20 @@
+name: edu360_hevc
+description: "Educational video HEVC - 360p high-clarity Lanczos + unsharp filter, x265 superfast, voice audio (maximum compression)"
+scaling: lanczos
+encodes:
+  - type: X265Encode
+    suffix: ""
+    width: 640
+    height: null
+    twoPass: false
+    params:
+      crf: "#{profileParams['crf'] ?: '30'}"
+      preset: "#{profileParams['preset'] ?: 'superfast'}"
+      threads: "#{profileParams['threads'] ?: '6'}"
+      vf: "#{profileParams['vf'] ?: 'unsharp=5:5:0.8:3:3:0.0'}"
+      pix_fmt: yuv420p
+      movflags: "+faststart"
+    audioEncode:
+      type: AudioEncode
+      codec: aac
+      bitrate: "#{profileParams['audio_bitrate'] ?: '48k'}"
