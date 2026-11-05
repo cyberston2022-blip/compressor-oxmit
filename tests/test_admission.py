@@ -89,6 +89,7 @@ async def test_disk_deferral(engine, fake_db, monkeypatch):
 async def test_duration_limit(engine, fake_db):
     fake_db.on_fetchrow(lambda sql: "FROM users" in sql, _users_row())
     with pytest.raises(AdmissionError) as exc:
-        await engine.check_duration_limit(1, 3 * 3600)  # normal tier: 2h max
+        await engine.check_duration_limit(1, 7 * 3600)  # normal tier: 6h max
     assert exc.value.code == "too_long"
+    await engine.check_duration_limit(1, 5 * 3600)  # 5h is within 6h limit
     await engine.check_duration_limit(1, 60)  # fine
