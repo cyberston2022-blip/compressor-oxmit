@@ -493,7 +493,7 @@ def build_router(engine, db, cfg, state) -> Router:
         """Watermark preview on a white canvas (existing behavior, honestly
         labeled as an approximation). Exposed for the branding hub."""
         wm = await _load_wm(uid)
-        img, font = _wm_asset_paths(uid)
+        img, font = engine._wm_asset_paths(uid)
         from .. import watermark as watermark_mod
         vf = watermark_mod.build_video_filter(wm, image_path=img, font_path=font)
         if vf is None:
