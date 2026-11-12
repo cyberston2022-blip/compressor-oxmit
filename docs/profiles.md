@@ -1,3 +1,7 @@
+> **Superseded (v3):** EDU480 is now the only active compression profile; the profiles below are historical. See the README section "The EDU480 profile" and `reports/architecture-v3/README.md`.
+>
+> **منسوخ (v3):** اکنون فقط پروفایل EDU480 فعال است؛ پروفایل‌های زیر تاریخی‌اند.
+
 # Compression Profiles
 
 Profiles use the official Encore YAML format
