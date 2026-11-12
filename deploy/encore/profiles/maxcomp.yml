@@ -10,7 +10,8 @@ encodes:
     params:
       crf: "#{profileParams['crf'] ?: '30'}"
       preset: "#{profileParams['preset'] ?: 'superfast'}"
-      threads: "#{profileParams['threads'] ?: '6'}"
+      threads: "#{profileParams['threads'] ?: '1'}"
+      x265-params: "#{profileParams['x265_params'] ?: profileParams['x265-params'] ?: 'pools=3:frame-threads=1'}"
       pix_fmt: yuv420p
       movflags: "+faststart"
     audioEncode:

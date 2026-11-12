@@ -21,6 +21,9 @@ from aiogram.types import (BotCommand, BotCommandScopeChat, FSInputFile,
 from . import archive as archive_mod
 from . import audit as audit_mod
 from . import decision_engine, dedup, media as media_mod
+from . import merge as merge_mod
+from . import quality as quality_mod
+from . import watermark as watermark_mod
 from .config import Settings
 from .encore_client import EncoreClient, EncoreError, EncoreNotFound
 from .log import get_logger
@@ -250,22 +253,37 @@ class JobEngine:
         return True, "ok"
 
     async def refresh_admin_commands(self) -> None:
-        """Default command list for everyone + an admin-scoped list (with
-        /admin and /panel) for every admin's private chat."""
+        """Command menus per scope (spec §7): users get the navigation set,
+        admins add ops/branding entries, the Owner adds management. Typed
+        commands still run their real permission checks — the menu only
+        improves discoverability."""
+        default = [
+            BotCommand(command="start", description="🚀 شروع"),
+            BotCommand(command="menu", description="🧭 منوی امکانات"),
+            BotCommand(command="myjobs", description="📋 کارهای من"),
+            BotCommand(command="settings", description="⚙️ تنظیمات"),
+            BotCommand(command="help", description="❓ راهنما"),
+        ]
+        admin_extra = [
+            BotCommand(command="admin", description="🛠 پنل عملیات"),
+            BotCommand(command="panel", description="🌐 پنل وب"),
+            BotCommand(command="branding", description="🎨 برندینگ شخصی"),
+            BotCommand(command="thumb", description="🖼 تامبنیل شخصی"),
+            BotCommand(command="wm", description="💧 واترمارک"),
+            BotCommand(command="cap", description="📝 کپشن شخصی"),
+            BotCommand(command="merge", description="🔗 ادغام ویدیوها"),
+        ]
         try:
-            base = [BotCommand(command="start", description="???????? / Start"),
-                    BotCommand(command="settings", description="?????? ?????????????? / Settings")]
-            await self.bot.set_my_commands(base)
-            admin_cmds = base + [
-                BotCommand(command="admin", description="???? ?????? ?????????? / Admin panel"),
-                BotCommand(command="panel", description="???? ?????? ???? / Web panel"),
-            ]
+            await self.bot.set_my_commands(default)
             for aid in await self.admin_ids():
+                cmds = list(default) + list(admin_extra)
+                if self.cfg.owner_telegram_id and aid == self.cfg.owner_telegram_id:
+                    cmds.append(BotCommand(command="owner",
+                                           description="👑 مدیریت Owner"))
                 await self.bot.set_my_commands(
-                    admin_cmds,
-                    scope=BotCommandScopeChat(chat_id=aid, type="chat"))
-        except Exception:  # noqa: BLE001 - cosmetic; never break the flow
-            log.exception("set_my_commands (admin scope) failed")
+                    cmds, scope=BotCommandScopeChat(chat_id=aid))
+        except TelegramAPIError:
+            log.exception("set_my_commands failed")
 
     async def notify_admins(self, text: str) -> None:
         for admin in await self.admin_ids():
@@ -347,9 +365,13 @@ class JobEngine:
         self.spawn(self.run_job(str(row["id"])))
 
     async def _delivery_thumbnail(self, job_id: str, video_path: Path,
-                                  out_probe: dict):
-        """Thumbnail for a fresh upload: admin global thumb if set, else a
-        frame grabbed from ~30% of the output video."""
+                                  out_probe: dict, personal_path: str | None = None):
+        """Thumbnail for a fresh upload. Precedence (spec 4.3): the job's
+        personal (per-admin, submission-time snapshot) thumbnail, then the
+        legacy system-wide global thumbnail, then a frame grabbed from ~30%
+        of the output video."""
+        if personal_path and Path(personal_path).is_file():
+            return FSInputFile(personal_path)
         global_thumb = self._global_thumb()
         if global_thumb is not None:
             return global_thumb
@@ -429,8 +451,8 @@ class JobEngine:
         except TelegramAPIError:
             pass
 
-    _STAGES = [("recv", "????"), ("queued", "????"), ("copy", "????"), ("encode", "??????"),
-               ("validate", "????"), ("archive", "????"), ("deliver", "????")]
+    _STAGES = [("recv", "🧾"), ("queued", "🧾"), ("copy", "📋"), ("encode", "⚙️"),
+               ("validate", "🔍"), ("archive", "🗂"), ("deliver", "📬")]
 
     def _stage_index(self, row) -> int:
         """0-based index of the current pipeline stage (7 = all done)."""
@@ -445,9 +467,9 @@ class JobEngine:
         cur = self._stage_index(row)
         parts = []
         for i, (_key, icon) in enumerate(self._STAGES):
-            mark = "???" if i < cur else ("???" if i == cur else "???")
+            mark = "✅" if i < cur else ("⏳" if i == cur else "　")
             parts.append(icon + mark)
-        return "???".join(parts)
+        return "→".join(parts)
 
     def _progress_text(self, row, lang: str, info: dict | None = None) -> str:
         info = info or {}
@@ -488,7 +510,7 @@ class JobEngine:
         if info and info.get("speed"):
             speed_txt = " " + tr("status_speed", lang, speed=f"{info['speed']:.1f}")
         filled = round(progress / 5)
-        bar = "???" * filled + "???" * (20 - filled)
+        bar = "█" * filled + "░" * (20 - filled)
         header = tr("status_header", lang, job=str(row["id"])[:8], profile=row["profile"])
         line = tr("status_line", lang, stage=tr(stage_key, lang), progress=progress,
                   elapsed=elapsed, eta=eta + speed_txt)
@@ -826,6 +848,7 @@ class JobEngine:
         profile_key: str, file_id: str | None = None, file_unique_id: str | None = None,
         local_path: str | None = None, allow_no_archive: bool = False,
         target_mb: int | None = None, compress_level: int | None = None,
+        allow_reuse: bool = True,
     ) -> dict:
         prof = BY_KEY.get(profile_key)
         if not prof:
@@ -898,6 +921,29 @@ class JobEngine:
 
         version = prof.version
         lock_key = f"{sha}:{profile_key}:v{version}"
+        # Submission-time personal-settings snapshot (multi-admin isolation,
+        # spec 4.4): a job must never re-read mutable per-admin config while
+        # processing, and two admins submitting simultaneously must not see
+        # each other's thumbnail/caption/watermark. One indexed lookup for
+        # everyone - regular users simply have no admin_settings row.
+        snap = await self.db.fetchrow(
+            """
+            SELECT thumbnail_path, caption, caption_mode, watermark,
+                   watermark_enabled
+            FROM admin_settings WHERE tg_id = $1
+            """,
+            tg_id,
+        )
+        personal_thumb = (snap["thumbnail_path"] if snap else None) or None
+        if personal_thumb and not Path(personal_thumb).is_file():
+            log.warning("personal thumbnail file missing at submission",
+                        extra={"detail": personal_thumb})
+            personal_thumb = None
+        personal_caption = (snap["caption"] if snap else None) or None
+        caption_mode = (snap["caption_mode"] if snap else None) or "replace"
+        watermark_json = None
+        if snap and snap["watermark_enabled"] and snap["watermark"]:
+            watermark_json = json.dumps(snap["watermark"])
         async with self.db.pool.acquire() as conn:
             async with conn.transaction():
                 # Per-user admission lock first (F9), then the dedup key:
@@ -948,9 +994,12 @@ class JobEngine:
                             similarity = reusable is not None
                 if reusable is not None:
                     if (profile_key == "level" and reusable["status"] == "no_gain"
-                            and profile_params):
+                            and profile_params and not (self.cfg.cache_offer and allow_reuse)):
                         # A previous CRF attempt already lost to this source -
                         # skip the doomed x264 pass, go straight to HEVC.
+                        # (Skipped when a cache offer will be shown: the user
+                        # gets the previous result anyway, and if they decline
+                        # the re-picked level escalates here.)
                         try:
                             x265_crf = int(str(profile_params.get("crf", "28"))) + 5
                         except (TypeError, ValueError):
@@ -960,9 +1009,11 @@ class JobEngine:
                             INSERT INTO jobs(requester_tg_id, media_id, profile, profile_version,
                                              effective_profile, status, priority, source_size,
                                              source_path, source_message_id, status_message_id,
-                                             progress_changed_at, stage, profile_params, reserved_bytes)
+                                             progress_changed_at, stage, profile_params, reserved_bytes,
+                                             personal_thumb_path, personal_caption, caption_mode,
+                                             watermark_json)
                             VALUES ($1,$2,$3,$4,'level265','queued',$5,$6,$7,$8,$9, now(),
-                                    'queued', $10::jsonb, $11)
+                                    'queued', $10::jsonb, $11, $12, $13, $14, $15)
                             RETURNING id
                             """,
                             tg_id, media_id, profile_key, version,
@@ -971,6 +1022,7 @@ class JobEngine:
                             json.dumps({"crf": str(x265_crf), "preset": "superfast"}),
                             int(size_bytes * self.cfg.admission_need_factor)
                             + self.cfg.admission_floor_bytes,
+                            personal_thumb, personal_caption, caption_mode, watermark_json,
                         )
                         await conn.execute(
                             """
@@ -986,12 +1038,32 @@ class JobEngine:
                         return {"outcome": "queued", "job_id": str(escal_job),
                                 "low_bitrate": False, "bitrate": probe.get("bitrate"),
                                 "estimate": ""}
-                    return await self._reuse_archive(
-                        reusable_parts, tg_id=tg_id, chat_id=chat_id, status_msg_id=status_msg_id,
-                        profile_key=profile_key, sha=sha, size_bytes=size_bytes,
-                        reuse_kind="fuzzy" if reuse_kind == "fuzzy" else
-                        ("similar" if similarity else "exact"),
-                    )
+                    if self.cfg.cache_offer and allow_reuse:
+                        # Interactive cache offer: show the user the best
+                        # already-compressed version (any profile) and let
+                        # them accept it, pick a strictly-lower profile, or
+                        # cancel - never silently deliver (CACHE-01).
+                        versions = quality_mod.group_versions(
+                            await dedup.find_cached_versions(
+                                self.db, reusable["source_sha256"]))
+                        best = quality_mod.pick_best_version(versions)
+                        if best is not None:
+                            await self.db.bump("cache_offers")
+                            log.info("cache offer raised", extra={
+                                "detail": f"sha={reusable['source_sha256'][:12]} "
+                                          f"profile={best['profile']} kind={reuse_kind}"})
+                        return self._offer_result(
+                            reusable["source_sha256"], reuse_kind, best, versions, probe)
+                    if allow_reuse or not self.cfg.cache_offer:
+                        return await self._reuse_archive(
+                            reusable_parts, tg_id=tg_id, chat_id=chat_id,
+                            status_msg_id=status_msg_id, profile_key=profile_key,
+                            sha=sha, size_bytes=size_bytes,
+                            reuse_kind="fuzzy" if reuse_kind == "fuzzy" else
+                            ("similar" if similarity else "exact"),
+                        )
+                    # allow_reuse=False (user declined the offer): fall
+                    # through - never silently reuse after an explicit no.
                 inflight = await dedup.find_inflight_job(self.db, sha, profile_key, version)
                 if inflight is None and profile_key in ("custom", "level"):
                     inflight = await dedup.find_fuzzy_inflight_job(
@@ -1011,6 +1083,32 @@ class JobEngine:
                     )
                     await self.db.bump("dedup_inflight_joined")
                     return {"outcome": "joined", "job_id": str(inflight["id"])}
+
+                # Any-profile cache offer (CACHE-02): the chosen profile has
+                # no cached result, but another profile's version exists.
+                # In-flight joins stay ahead of this - if the exact encode the
+                # user asked for is already running, joining it beats offering
+                # a lower-tier cache.
+                if self.cfg.cache_offer and allow_reuse:
+                    offer_sha = sha
+                    offer_rows = await dedup.find_cached_versions(self.db, sha)
+                    if not offer_rows and profile_key in ("custom", "level"):
+                        fuzzy_sha = await dedup.find_fuzzy_source(
+                            self.db, size_bytes=size_bytes, name_norm=name_norm,
+                            duration_s=probe.get("duration_s") or 0.0,
+                        )
+                        if fuzzy_sha:
+                            offer_sha = fuzzy_sha
+                            offer_rows = await dedup.find_cached_versions(self.db, fuzzy_sha)
+                    versions = quality_mod.group_versions(offer_rows)
+                    best = quality_mod.pick_best_version(versions)
+                    if best is not None:
+                        await self.db.bump("cache_offers")
+                        log.info("cache offer raised (cross-profile)", extra={
+                            "detail": f"sha={offer_sha[:12]} "
+                                      f"profile={best['profile']}"})
+                        return self._offer_result(
+                            offer_sha, reuse_kind, best, versions, probe)
 
                 # Adaptive Decision Engine: Smart fastpath, dynamic preset & rate control
                 dec = decision_engine.make_decision(
@@ -1041,9 +1139,11 @@ class JobEngine:
                     INSERT INTO jobs(requester_tg_id, media_id, profile, profile_version,
                                      effective_profile, status, priority, source_size,
                                      source_path, source_message_id, status_message_id,
-                                     progress_changed_at, stage, profile_params, reserved_bytes)
+                                     progress_changed_at, stage, profile_params, reserved_bytes,
+                                     personal_thumb_path, personal_caption, caption_mode,
+                                     watermark_json)
                     VALUES ($1,$2,$3,$4,$5,$6,$14,$7,$8,$9,$10, now(),
-                            $11, $12::jsonb, $13)
+                            $11, $12::jsonb, $13, $15, $16, $17, $18)
                     RETURNING id
                     """,
                     tg_id, media_id, profile_key, version,
@@ -1055,6 +1155,7 @@ class JobEngine:
                     deferred_need or int(size_bytes * self.cfg.admission_need_factor)
                     + self.cfg.admission_floor_bytes,
                     70 if is_admin else (await self.effective_limits(tg_id))["priority"],
+                    personal_thumb, personal_caption, caption_mode, watermark_json,
                 )
                 await conn.execute(
                     """
@@ -1124,6 +1225,51 @@ class JobEngine:
         return " | ".join(parts)
 
     # ------------------------------------------------------------------
+    # cache-offer path
+    # ------------------------------------------------------------------
+    def _offer_result(self, sha: str, reuse_kind: str, best: dict,
+                      versions: list[dict], probe: dict) -> dict:
+        """Uniform handle_submission result for the interactive cache offer."""
+        return {
+            "outcome": "offer",
+            "sha": sha,
+            "reuse_kind": reuse_kind,
+            "best": best,
+            "versions": versions,
+            "probe": {
+                "width": probe.get("width"),
+                "height": probe.get("height"),
+                "duration_s": probe.get("duration_s"),
+            },
+            "bitrate": probe.get("bitrate"),
+        }
+
+    async def deliver_cached_offer(
+        self, *, sha: str, profile_key: str, profile_version: int,
+        reuse_kind: str, tg_id: int, chat_id: int | None,
+        status_msg_id: int | None, size_bytes: int,
+    ) -> dict:
+        """Deliver the cached version the user explicitly accepted.
+
+        Re-queries the archive parts right before delivery: the archive may
+        have been invalidated between the offer and the click - in that case
+        the caller gets {"outcome": "cache_gone"} and offers a fresh encode.
+        """
+        parts = await dedup.find_reusable_parts(self.db, sha, profile_key, profile_version)
+        if not parts:
+            log.info("cache offer expired before acceptance",
+                     extra={"detail": f"sha={sha[:12]} profile={profile_key}"})
+            return {"outcome": "cache_gone"}
+        result = await self._reuse_archive(
+            parts, tg_id=tg_id, chat_id=chat_id, status_msg_id=status_msg_id,
+            profile_key=profile_key, sha=sha, size_bytes=size_bytes,
+            reuse_kind=reuse_kind,
+        )
+        if result.get("delivered"):
+            await self.db.bump("cache_accepted")
+        return result
+
+    # ------------------------------------------------------------------
     # reuse path
     # ------------------------------------------------------------------
     async def _reuse_archive(self, reusable_parts, *, tg_id, chat_id, status_msg_id,
@@ -1160,6 +1306,12 @@ class JobEngine:
             )
             await self.db.bump("archive_missing_detected")
             log.warning("archive message missing on reuse", extra={"detail": str(archive_id)})
+
+        await self.db.execute(
+            "UPDATE archive_records SET reuse_count = reuse_count + 1, "
+            "last_reused_at = now() WHERE id = $1",
+            archive_id,
+        )
 
         job_id = await self.db.fetchval(
             """
@@ -1296,8 +1448,14 @@ class JobEngine:
             if source is None or not source.is_file():
                 source = await self._refetch_source(row)
             if source is None or not source.is_file():
-                await self.fail_job(row, "source_unavailable", "source file vanished")
-                return
+                # Original gone (bot-api eviction + refetch failed): fall back
+                # to the best archived derivative rather than failing outright
+                # (CACHE-05). The fallback recomputes the effective profile
+                # against the derivative's real dims - never upscaling.
+                source = await self._derivative_fallback(row)
+                if source is None:
+                    await self.fail_job(row, "source_unavailable", "source file vanished")
+                    return
 
             free = self._disk_free()
             reserved = await self.db.fetchval(
@@ -1452,6 +1610,233 @@ class JobEngine:
             "UPDATE jobs SET source_path = $2 WHERE id = $1", row["id"], str(stable)
         )
         return stable
+
+    async def _derivative_fallback(self, row):
+        """Original source gone: serve the job from the best archived derivative.
+
+        Tries candidates best-quality-first and stops at the first one whose
+        Telegram file is still fetchable. The effective profile is recomputed
+        against the derivative's REAL dims (resolve_variant never upscales),
+        so a 720p request served from a 480p copy becomes a 480p encode and
+        is flagged source_degraded - the user is never told it is the full
+        quality of their original (CACHE-05, spec rule 5).
+        """
+        src = await self.db.fetchrow(
+            "SELECT sha256 FROM media_assets WHERE id = $1", row["media_id"]
+        )
+        if not src or not src["sha256"]:
+            return None
+        versions = quality_mod.group_versions(
+            await dedup.find_cached_versions(self.db, src["sha256"])
+        )
+        candidates = [
+            v for v in versions
+            if v["status"] == "active" and v["out_tg_file_id"]
+            and v["out_w"] and v["out_h"]
+        ]
+        while candidates:
+            best = quality_mod.pick_best_version(candidates)
+            if best is None:
+                break
+            candidates = [v for v in candidates if v is not best]
+            try:
+                tg_file = await self.bot.get_file(best["out_tg_file_id"])
+            except TelegramAPIError as exc:
+                log.warning("derivative fetch failed", extra={
+                    "job_id": str(row["id"]), "detail": str(exc)[:150]})
+                continue
+            path = await self.resolve_local_path(tg_file.file_path)
+            if path is None:
+                continue
+            prof = BY_KEY.get(row["profile"])
+            eff = row["effective_profile"]
+            if prof is not None and prof.max_short_side:
+                eff = resolve_variant(row["profile"], best["out_w"], best["out_h"])
+            await self.db.execute(
+                "UPDATE jobs SET source_degraded = TRUE, effective_profile = $2, "
+                "updated_at = now() WHERE id = $1",
+                row["id"], eff,
+            )
+            await self.db.bump("degraded_source_fallbacks")
+            log.warning("encoding from archived derivative", extra={
+                "job_id": str(row["id"]),
+                "detail": f"from={best['profile']} {best['out_w']}x{best['out_h']} "
+                          f"effective={eff}"})
+            return Path(path)
+        return None
+
+    # ------------------------------------------------------------------
+    # merge jobs (spec: Merge / Merge + Compress)
+    # ------------------------------------------------------------------
+    async def merge_job(self, session_id: str) -> None:
+        """Run one merge session: probe -> strategy -> concat -> validate ->
+        (compress via the EXISTING pipeline | direct delivery).
+
+        Merge+compress reuses handle_submission(local_path=...) so profiles,
+        size-target policies, adaptive logic, the queue, progress and
+        delivery all come from the standard flow - no second engine.
+        UX (spec §11.6): one status message edited through the real stages,
+        labels only - no invented percentages.
+        """
+        sess = await merge_mod.get_session(self.db, session_id)
+        if not sess or sess["status"] != "merging":
+            return
+        chat_id = sess["chat_id"]
+        tg_id = sess["tg_id"]
+        lang = await self._lang(tg_id)
+        status_msg: int | None = None
+
+        async def _stage(text: str) -> None:
+            nonlocal status_msg
+            try:
+                if status_msg is None:
+                    m = await self.bot.send_message(chat_id, text)
+                    status_msg = m.message_id
+                else:
+                    await self.bot.edit_message_text(
+                        chat_id=chat_id, message_id=status_msg, text=text)
+            except TelegramAPIError:
+                pass
+
+        try:
+            await _stage(tr("mrg_stage_preparing", lang))
+            items = await merge_mod.list_items(self.db, session_id)
+            if len(items) < 2:
+                raise merge_mod.MergeError("fewer than two valid inputs")
+            probes = []
+            for it in items:
+                if not it["staged_path"] or not Path(it["staged_path"]).is_file():
+                    raise merge_mod.MergeError(
+                        f"staged file missing for item {it['seq']}")
+                probes.append(await media_mod.probe_video(it["staged_path"]))
+            await _stage(tr("mrg_stage_analyze", lang))
+            strategy, why = merge_mod.decide_strategy(probes)
+            strategy_label = tr("mrg_strategy_copy", lang) if strategy == "copy" \
+                else tr("mrg_strategy_reencode", lang)
+            expected = sum((p.get("duration_s") or 0.0) for p in probes)
+            work_dir = Path(self.cfg.media_incoming) / f"merge-{session_id[:8]}"
+            work_dir.mkdir(parents=True, exist_ok=True)
+            out_dir = Path(self.cfg.media_out) / f"merge-{session_id[:8]}"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / "merged.mp4"
+            log.info("merge strategy chosen", extra={
+                "detail": f"session={session_id[:8]} strategy={strategy} ({why})"})
+            await _stage(tr("mrg_stage_merge", lang) + "\n" + strategy_label)
+            if strategy == "copy":
+                await merge_mod.run_copy_merge(
+                    [it["staged_path"] for it in items], str(out_path),
+                    str(work_dir))
+            else:
+                await merge_mod.run_reencode_merge(
+                    [it["staged_path"] for it in items], str(out_path),
+                    str(work_dir), merge_mod.normalize_target(probes),
+                    durations=[p.get("duration_s") or 0.0 for p in probes],
+                    threads=self.cfg.ffmpeg_threads_single)
+            await _stage(tr("mrg_stage_validate", lang))
+            await merge_mod.validate_output(str(out_path), expected)
+            out_size = out_path.stat().st_size
+
+            if not sess["compress"]:
+                # Direct delivery with the owner's branding (caption/thumb).
+                personal = await self._delivery_personal(
+                    {"requester_tg_id": tg_id}, tg_id)
+                caption = self._compose_caption(personal, None)
+                thumb_file = self._personal_thumb_file(personal) \
+                    or self._global_thumb()
+                if out_size > self.cfg.max_upload_bytes:
+                    raise merge_mod.MergeError(
+                        "merged file exceeds the Telegram upload limit - "
+                        "use merge+compress")
+                sent_ok = False
+                try:
+                    await self.bot.send_video(
+                        chat_id=chat_id, video=FSInputFile(str(out_path)),
+                        caption=caption, supports_streaming=True,
+                        thumbnail=thumb_file)
+                    sent_ok = True
+                except TelegramAPIError as exc:
+                    raise merge_mod.MergeError(f"delivery failed: {str(exc)[:120]}")
+                finally:
+                    if sent_ok:
+                        await self.db.bump("merges_completed")
+                await merge_mod.finish_session(self.db, session_id, str(out_path))
+                merged_probe = await media_mod.probe_video(out_path)
+                summary = tr("mrg_done_summary", lang,
+                             count=len(items),
+                             dur=_fmt_clock(merged_probe.get("duration_s") or 0),
+                             size=media_mod.human_size(out_size),
+                             strategy=strategy_label)
+                try:
+                    await self.bot.send_message(
+                        chat_id, summary,
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                            InlineKeyboardButton(
+                                text=tr("mrg_btn_compress_this", lang),
+                                callback_data=f"mg:compress:{session_id}")]]),
+                    )
+                except TelegramAPIError:
+                    pass
+                if status_msg is not None:
+                    try:
+                        await self.bot.delete_message(chat_id, status_msg)
+                    except TelegramAPIError:
+                        pass
+                await asyncio.to_thread(
+                    shutil.rmtree, work_dir, True)
+                return
+
+            # --- Merge + Compress: hand the merged file to the standard flow
+            await merge_mod.set_status(self.db, session_id, "compressing")
+            await _stage(tr("mrg_stage_ready", lang))
+            result = await self.handle_submission(
+                tg_id=tg_id, chat_id=chat_id, source_msg_id=None,
+                status_msg_id=None, size_bytes=out_size,
+                filename="merged.mp4", profile_key=sess["profile"] or "edu480",
+                local_path=str(out_path), target_mb=sess["target_mb"],
+            )
+            outcome = result.get("outcome")
+            await merge_mod.finish_session(
+                self.db, session_id,
+                str(out_path) if outcome != "failed" else None)
+            await self.db.bump("merges_completed")
+            note = {
+                "queued": tr("mrg_compress_queued", lang),
+                "deferred": tr("mrg_compress_deferred", lang),
+                "joined": tr("mrg_compress_joined", lang),
+                "reused": tr("mrg_compress_reused", lang),
+                "offer": tr("mrg_compress_offer", lang),
+            }.get(outcome, tr("mrg_compress_queued", lang))
+            try:
+                await self.bot.send_message(
+                    chat_id, tr("mrg_compress_started", lang) + "\n" + note)
+            except TelegramAPIError:
+                pass
+            if status_msg is not None:
+                try:
+                    await self.bot.delete_message(chat_id, status_msg)
+                except TelegramAPIError:
+                    pass
+            await asyncio.to_thread(shutil.rmtree, work_dir, True)
+        except merge_mod.MergeError as exc:
+            await merge_mod.set_status(self.db, session_id, "failed", str(exc)[:200])
+            await self.db.bump("merges_failed")
+            log.warning("merge failed", extra={
+                "detail": f"session={session_id[:8]}: {exc}"})
+            try:
+                await self.bot.send_message(
+                    chat_id, tr("mrg_failed", lang, reason=str(exc)[:160]))
+            except TelegramAPIError:
+                pass
+        except Exception:  # noqa: BLE001 - never leave the session 'merging'
+            log.exception("merge_job crashed", extra={"detail": session_id[:8]})
+            await merge_mod.set_status(self.db, session_id, "failed",
+                                       "internal error")
+            await self.db.bump("merges_failed")
+            try:
+                await self.bot.send_message(chat_id, tr("mrg_failed", lang,
+                                                        reason="internal error"))
+            except TelegramAPIError:
+                pass
 
     def _callback_sig(self, job_id: str) -> str:
         return hmac_mod.new(
@@ -1876,6 +2261,16 @@ class JobEngine:
                 )
                 return
 
+        # Validate the ACTUAL output resolution against the requested profile
+        # cap - the requested profile name alone never proves what the encoder
+        # produced (spec rule 6). Logged, not failed: a mismatch is a profile
+        # bug to investigate, but the output is still a faithful encode.
+        res_note = quality_mod.resolution_note(
+            row["profile"], out_probe.get("width"), out_probe.get("height"))
+        if res_note:
+            log.warning("output resolution above profile cap", extra={
+                "job_id": job_id, "detail": res_note})
+
         # Deliver with the user's own filename instead of "out.mp4".
         renamed = output_path.parent / final_name
         if renamed != output_path and not renamed.exists():
@@ -1931,7 +2326,12 @@ class JobEngine:
 
         # Admin global thumb if set, else grab a frame from the output so
         # every delivered/archived video gets a proper preview.
-        thumbnail = await self._delivery_thumbnail(job_id, output_path, out_probe)
+        personal_thumb = (row["personal_thumb_path"]
+                          if "personal_thumb_path" in row.keys() else None)
+        if personal_thumb and Path(personal_thumb).is_file():
+            await self.db.bump("personal_thumb_jobs")
+        thumbnail = await self._delivery_thumbnail(
+            job_id, output_path, out_probe, personal_path=personal_thumb)
 
         if needs_split and not no_gain:
             ok = await self._complete_split(
@@ -2268,7 +2668,8 @@ class JobEngine:
 
     def _summary_text(self, lang: str, *, job_id: str, profile: str, filename: str,
                       source_size: int, output_size: int, probe: dict,
-                      started, completed, new: bool, no_gain: bool = False) -> str:
+                      started, completed, new: bool, no_gain: bool = False,
+                      degraded: bool = False) -> str:
         mins = "-"
         if started and completed:
             started_tz = _ensure_tz(started)
@@ -2304,6 +2705,8 @@ class JobEngine:
         ]
         if no_gain:
             lines.append(tr("status_done_nogain", lang))
+        if degraded:
+            lines.append(tr("summary_degraded", lang))
         return "\n".join(lines)
 
     async def _deliver_parts(self, chat_id: int, archive_ids: list, lang: str,
@@ -2346,6 +2749,89 @@ class JobEngine:
             except TelegramAPIError:
                 pass
         return all_ok, delivered
+
+    # ------------------------------------------------------------------
+    # per-recipient personal settings (multi-admin isolation)
+    # ------------------------------------------------------------------
+    def _wm_asset_paths(self, tg_id: int) -> tuple[str | None, str | None]:
+        """Per-admin watermark image + uploaded font (Argon layout:
+        watermarks/{tg_id}.png, watermarks/fonts/{tg_id}.ttf)."""
+        img = Path(self.cfg.media_watermarks) / f"{tg_id}.png"
+        font = Path(self.cfg.media_watermarks) / "fonts" / f"{tg_id}.ttf"
+        return (str(img) if img.is_file() else None,
+                str(font) if font.is_file() else None)
+
+    async def _delivery_personal(self, row, tg_id: int) -> dict:
+        """Personal settings for ONE delivery recipient.
+
+        The job's submitter uses the submission-time snapshot stored on the
+        job row (spec 4.4 - config changes mid-job never leak in). Any other
+        requester (in-flight joiner) gets their OWN current settings fetched
+        at delivery, so nobody ever receives someone else's branding.
+        """
+        is_submitter = tg_id == row["requester_tg_id"]
+        cap = mode = thumb = None
+        wm_raw = None
+        if is_submitter and "personal_caption" in row.keys():
+            cap = row["personal_caption"]
+            mode = row["caption_mode"]
+            thumb = (row["personal_thumb_path"]
+                     if "personal_thumb_path" in row.keys() else None)
+            wm_raw = row["watermark_json"] if "watermark_json" in row.keys() else None
+        else:
+            snap = await self.db.fetchrow(
+                """
+                SELECT thumbnail_path, caption, caption_mode, watermark,
+                       watermark_enabled
+                FROM admin_settings WHERE tg_id = $1
+                """,
+                tg_id,
+            )
+            if snap:
+                cap = snap["caption"]
+                mode = snap["caption_mode"]
+                thumb = snap["thumbnail_path"]
+                if snap["watermark_enabled"] and snap["watermark"]:
+                    wm_raw = json.dumps(snap["watermark"])
+        wm = None
+        if wm_raw:
+            try:
+                wm = watermark_mod.normalize_wm(json.loads(wm_raw))
+            except (ValueError, TypeError):
+                wm = None
+        if thumb and not Path(thumb).is_file():
+            thumb = None
+        return {"caption": cap, "caption_mode": mode or "replace",
+                "wm": wm, "thumb_path": thumb}
+
+    def _compose_caption(self, personal: dict, base: str | None) -> str | None:
+        """Personal caption (Telegram-side, never burned in) with mode
+        handling and the 1024-char Telegram caption limit."""
+        cap = (personal.get("caption") or "").strip()
+        if not cap:
+            return base
+        if personal.get("caption_mode") == "append" and base:
+            text = f"{base}\n\n{cap}"
+        else:
+            text = cap
+        return text[:1024]
+
+    def _personal_thumb_file(self, personal: dict):
+        path = personal.get("thumb_path")
+        if path and Path(path).is_file():
+            return FSInputFile(path)
+        return None
+
+    def _job_output_file(self, job_id: str) -> Path | None:
+        """Largest file in the job's output dir (the encoded result)."""
+        out_dir = Path(self.cfg.media_out) / str(job_id)
+        if not out_dir.is_dir():
+            return None
+        candidates = [p for p in out_dir.iterdir()
+                      if p.is_file() and not p.name.endswith(".part")]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda p: p.stat().st_size)
 
     async def _deliver_to_requesters(
         self, row, archive_id, output_media_id, out_file_id,
@@ -2394,6 +2880,7 @@ class JobEngine:
                 probe=effective_probe,
                 started=started, completed=completed,
                 new=not row["reuse_of"], no_gain=no_gain,
+                degraded="source_degraded" in row.keys() and bool(row["source_degraded"]),
             )
             if blocked:
                 await self.edit_status_sync(
@@ -2435,23 +2922,73 @@ class JobEngine:
                         r["chat_id"], part_ids, lang, part_total,
                     )
                     ok, method, mid = all_ok, "parts", None
-                elif pref.get("delivery_style") == "doc" and out_asset and out_asset["tg_file_id"]:
-                    ok, method, mid = False, "none", None
-                    try:
-                        msg = await self.bot.send_document(
-                            chat_id=r["chat_id"], document=out_asset["tg_file_id"],
-                            caption=summary.split("\n")[0],
-                        )
-                        ok, method, mid = True, "doc_file_id", msg.message_id
-                    except TelegramAPIError as exc:
-                        log.info("doc delivery failed, falling back",
-                                 extra={"detail": str(exc)[:150]})
-                    if not ok:
-                        ok, method, mid = await self._deliver_archive_to(
-                            r["chat_id"], archive_row, pref)
                 else:
-                    ok, method, mid = await self._deliver_archive_to(
-                        r["chat_id"], archive_row, pref)
+                    # Per-recipient branding: watermark (fresh upload only -
+                    # the archive copy stays clean so reuse never leaks one
+                    # admin's watermark to another), personal caption and
+                    # personal thumbnail. Split/no_gain/blocked paths above
+                    # intentionally skip branding (documented limitation).
+                    personal = await self._delivery_personal(row, r["tg_id"])
+                    caption = self._compose_caption(personal, None)
+                    thumb_file = self._personal_thumb_file(personal)
+                    if thumb_file is not None:
+                        await self.db.bump("personal_thumb_jobs")
+                    if caption:
+                        await self.db.bump("personal_caption_jobs")
+                    wm_done = False
+                    if personal["wm"] and (row.get("effective_profile")
+                                           if hasattr(row, "get") else None) != "remux":
+                        src = self._job_output_file(str(row["id"]))
+                        if src is not None:
+                            img, font = self._wm_asset_paths(r["tg_id"])
+                            wm_path = (Path(self.cfg.media_tmp)
+                                       / f"wm-{str(row['id'])[:8]}-{r['tg_id']}.mp4")
+                            wm_path.parent.mkdir(parents=True, exist_ok=True)
+                            wm_done = await watermark_mod.apply_watermark(
+                                src, wm_path, personal["wm"],
+                                image_path=img, font_path=font,
+                                threads=self.cfg.ffmpeg_threads_single)
+                            if wm_done:
+                                await self.db.bump("watermark_jobs")
+                                ok, method, mid = False, "none", None
+                                try:
+                                    msg = await self.bot.send_video(
+                                        chat_id=r["chat_id"],
+                                        video=FSInputFile(str(wm_path)),
+                                        caption=caption,
+                                        supports_streaming=True,
+                                        thumbnail=thumb_file,
+                                    )
+                                    ok, method, mid = True, "watermark_upload", msg.message_id
+                                except TelegramAPIError as exc:
+                                    log.warning("watermarked delivery failed",
+                                                extra={"detail": str(exc)[:150]})
+                                finally:
+                                    try:
+                                        wm_path.unlink(missing_ok=True)
+                                    except OSError:
+                                        pass
+                    if not wm_done:
+                        if pref.get("delivery_style") == "doc" and out_asset and out_asset["tg_file_id"]:
+                            ok, method, mid = False, "none", None
+                            try:
+                                msg = await self.bot.send_document(
+                                    chat_id=r["chat_id"], document=out_asset["tg_file_id"],
+                                    caption=self._compose_caption(
+                                        personal, summary.split("\n")[0]),
+                                )
+                                ok, method, mid = True, "doc_file_id", msg.message_id
+                            except TelegramAPIError as exc:
+                                log.info("doc delivery failed, falling back",
+                                         extra={"detail": str(exc)[:150]})
+                            if not ok:
+                                ok, method, mid = await self._deliver_archive_to(
+                                    r["chat_id"], archive_row, pref,
+                                    caption=caption, thumbnail=thumb_file)
+                        else:
+                            ok, method, mid = await self._deliver_archive_to(
+                                r["chat_id"], archive_row, pref,
+                                caption=caption, thumbnail=thumb_file)
             if (archive_row and archive_row["message_id"] and ok
                     and method in ("file_id", "upload")):
                 await self.db.execute(
@@ -2494,7 +3031,8 @@ class JobEngine:
             await self.edit_status_sync(r["chat_id"], r["status_message_id"], summary)
 
     async def _deliver_archive_to(self, chat_id: int, archive_row, pref: dict,
-                                  caption: str | None = None) -> tuple[bool, str, int | None]:
+                                  caption: str | None = None,
+                                  thumbnail=None) -> tuple[bool, str, int | None]:
         return await archive_mod.deliver_result(
             self,
             chat_id=chat_id,
@@ -2503,6 +3041,7 @@ class JobEngine:
             file_id=(archive_row["output_tg_file_id"] if archive_row and
                      "output_tg_file_id" in archive_row.keys() else None),
             caption=caption,
+            thumbnail=thumbnail,
         )
 
     async def redeliver(self, job_id: str, chat_id: int, tg_id: int) -> tuple[bool, str]:
@@ -2641,6 +3180,21 @@ class JobEngine:
                      extra={"job_id": str(row["id"]), "status": row["status"]})
             if not row["encore_job_id"]:
                 self.spawn(self.run_job(str(row["id"])))
+        # Merge sessions interrupted mid-run cannot be resumed safely (the
+        # concat subprocess died with the process): mark them failed; the
+        # staged inputs stay on disk for a new session if wanted.
+        n = await self.db.execute(
+            "UPDATE merge_sessions SET status = 'failed', "
+            "error = 'interrupted by restart', updated_at = now() "
+            "WHERE status IN ('merging', 'compressing')"
+        )
+        if n and n != "UPDATE 0":
+            log.warning("interrupted merge sessions failed", extra={"detail": n})
+        # Abandoned collecting sessions (no activity for a day) are cancelled.
+        try:
+            await merge_mod.fail_stale_sessions(self.db, stale_hours=24)
+        except Exception:  # noqa: BLE001 - recovery is best-effort
+            log.exception("merge stale-session cleanup failed")
 
 
 def failure_markup(job_id: str, lang: str = "fa") -> InlineKeyboardMarkup:

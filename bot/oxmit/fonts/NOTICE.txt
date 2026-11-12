@@ -1,0 +1,10 @@
+Roboto-Regular.ttf — bundled default watermark font.
+
+Source: ArgonsEncoder (bot/fonts/Roboto-Regular.ttf), project
+https://github.com/Itzmepromgitman/ArgonsEncoder, LICENSE: GNU GPL-3.0.
+Module attribution in that project: "Developed by ARGON telegram: @REACTIVEARGON".
+
+Roboto itself is licensed under the Apache License 2.0 (Google). This copy is
+reused inside the same owner's oxmit deployment; if oxmit is ever distributed,
+keep this notice and the GPL-3.0 obligations for the ported watermark code
+(bot/oxmit/watermark.py).

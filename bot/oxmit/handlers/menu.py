@@ -28,8 +28,15 @@ def build_router(engine, db, cfg, state) -> Router:
         admins = await engine.admin_ids()
         first = not admins and cfg.owner_claim
         if first:
-            await db.execute("UPDATE users SET is_admin = TRUE WHERE tg_id = $1",
-                             message.from_user.id)
+            # Conditional write: two concurrent first-run /start tasks must
+            # not both mint an owner. (A truly simultaneous race can still
+            # slip through READ COMMITTED; operators can /demote — accepted,
+            # owner_claim is opt-in and first-run only.)
+            await db.execute(
+                "UPDATE users SET is_admin = TRUE WHERE tg_id = $1 "
+                "AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin)",
+                message.from_user.id,
+            )
             engine.invalidate_lang(message.from_user.id)
             log.warning("bootstrap admin claimed", extra={"user_id": message.from_user.id})
         admin_user = first or await is_admin(db, cfg, message.from_user.id)
@@ -75,17 +82,19 @@ def build_router(engine, db, cfg, state) -> Router:
 
     @router.callback_query(F.data == "fsub:check")
     async def on_fsub_check(callback: CallbackQuery):
-        await callback.answer()
         forcesub.clear_cache()
         block = await forcesub.gate(engine, db, callback.from_user.id,
                                     is_admin_user=await is_admin(db, cfg,
                                                                  callback.from_user.id))
         if block is None:
+            await callback.answer()
             try:
                 await callback.message.edit_text(tr("fsub_ok", "fa"))
             except Exception:  # noqa: BLE001
                 pass
         else:
+            # Single answer per query: answering twice raises
+            # TelegramBadRequest and the alert never reaches the user.
             await callback.answer(tr("fsub_still_not", "fa"), show_alert=True)
 
     return router

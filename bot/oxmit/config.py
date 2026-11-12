@@ -96,6 +96,11 @@ class Settings:
     sim_max_single: int = 12
     sim_duration_tol: float = 2.0
 
+    # Cache offers: when a compressed version of the source already exists,
+    # ask the user (send existing / lower profile / cancel) instead of
+    # silently reusing the archive. False restores the old silent behavior.
+    cache_offer: bool = True
+
     max_jobs_per_day: int = 30
     target_min_mb: int = 5
     target_max_gb: int = 8
@@ -204,6 +209,26 @@ class Settings:
                 errs.append(f"{name}={val} must be >= 1")
         if self.job_retries < 0:
             errs.append(f"JOB_RETRIES={self.job_retries} must be >= 0")
+        # Ranges that previously slipped through: zero/negative values here
+        # silently disable or break the mechanisms they feed.
+        if self.admission_need_factor <= 0:
+            errs.append(f"ADMISSION_NEED_FACTOR={self.admission_need_factor} must be > 0 "
+                        "(<= 0 lets disk admission overcommit indefinitely)")
+        if self.progress_edit_seconds < 1:
+            errs.append(f"PROGRESS_EDIT_SECONDS={self.progress_edit_seconds} must be >= 1 "
+                        "(< 1 floods Telegram with edits on every poll)")
+        if self.max_upload_bytes <= 0:
+            errs.append(f"MAX_UPLOAD_MB={self.max_upload_bytes // 1024 // 1024} must be > 0")
+        if self.min_video_kbps <= 0:
+            errs.append(f"MIN_VIDEO_KBPS={self.min_video_kbps} must be > 0")
+        if self.tmp_retention_hours < 1:
+            errs.append(f"TMP_RETENTION_HOURS={self.tmp_retention_hours} must be >= 1")
+        if self.sim_duration_tol < 0:
+            errs.append(f"SIMILARITY_DURATION_TOL_S={self.sim_duration_tol} must be >= 0")
+        if self.segment_min_duration < 0:
+            errs.append(f"SEGMENT_MIN_DURATION={self.segment_min_duration} must be >= 0")
+        if self.max_source_bytes <= 0:
+            errs.append(f"MAX_SOURCE_GB={self.max_source_bytes // 1024**3} must be > 0")
         if self.segment_enabled and self.segment_length <= 0:
             errs.append("SEGMENT_LENGTH must be > 0 when SEGMENT_ENABLED=true")
         if not 1 <= self.ffmpeg_threads_single <= 32:
@@ -233,6 +258,10 @@ class Settings:
     @property
     def media_thumbs(self) -> str:
         return os.path.join(self.media_root, "thumbs")
+
+    @property
+    def media_watermarks(self) -> str:
+        return os.path.join(self.media_root, "watermarks")
 
 
 def load_settings() -> Settings:
@@ -285,6 +314,7 @@ def load_settings() -> Settings:
     s.sim_mean_max = _int("SIMILARITY_MEAN_MAX", 5)
     s.sim_max_single = _int("SIMILARITY_MAX_SINGLE", 12)
     s.sim_duration_tol = _float("SIMILARITY_DURATION_TOL_S", 2.0)
+    s.cache_offer = _bool("CACHE_OFFER", True)
 
     s.max_jobs_per_day = _int("MAX_JOBS_PER_DAY", 30)
     s.target_min_mb = _int("TARGET_MIN_MB", 5)

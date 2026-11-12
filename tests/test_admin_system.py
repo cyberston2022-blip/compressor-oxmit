@@ -76,9 +76,11 @@ async def test_refresh_admin_commands_scopes(fake_db):
     eng = _engine(fake_db)
     _admins(fake_db, [7, 100])
     await eng.refresh_admin_commands()
-    # default scope (2 cmds) + one private scope per admin (4 cmds each)
-    assert eng.bot.calls[0] == (2, None)
-    assert all(n == 4 for n, _ in eng.bot.calls[1:])
+    # default scope (5 nav cmds); private scope per admin = 5 + 7 admin
+    # entries = 12; the owner's own scope adds /owner -> 13
+    assert eng.bot.calls[0] == (5, None)
+    assert eng.bot.calls[1] == (12, eng.bot.calls[1][1])
+    assert eng.bot.calls[2] == (13, eng.bot.calls[2][1])
     assert len(eng.bot.calls) == 3
 
 

@@ -38,13 +38,18 @@ def _json(data, status: int = 200) -> web.Response:
     return web.json_response(data, status=status)
 
 
-def build_app(engine, db, cfg, state, redis_client=None) -> web.Application:
+def build_app(engine, db, cfg, state, redis_client=None,
+              shared_sessions: dict | None = None) -> web.Application:
     app = web.Application()
     app["engine"] = engine
     app["db"] = db
     app["cfg"] = cfg
     app["state"] = state
     app["redis"] = redis_client
+    if shared_sessions is not None:
+        # Must be set BEFORE webpanel.setup: setup() uses app.setdefault, so
+        # the pre-seeded store wins and both apps share one session state.
+        app["panel_sessions"] = shared_sessions
     webpanel.setup(app, engine, db, cfg, state)
 
     gen_history: deque[float] = deque(maxlen=GEN_MAX_PER_HOUR)
@@ -143,7 +148,12 @@ def build_app(engine, db, cfg, state, redis_client=None) -> web.Application:
             body = await request.json()
         except (json.JSONDecodeError, UnicodeDecodeError):
             body = {}
-        secs = min(int(body.get("secs") or 30), 600)
+        try:
+            secs = min(int(body.get("secs") or 30), 600)
+        except (TypeError, ValueError):
+            return _json({"error": "bad secs"}, status=400)
+        if secs < 1:
+            secs = 1
         big = bool(body.get("big"))
         w, h = (1920, 1080) if big else (1280, 720)
         rate = "30"
@@ -180,10 +190,23 @@ def build_app(engine, db, cfg, state, redis_client=None) -> web.Application:
         profile = body.get("profile") or "balanced"
         if not path or not Path(path).is_file():
             return _json({"error": "path missing"}, status=400)
+        # Damage bounds (SEC-4): the token is static, so a leaked token must
+        # not become an arbitrary-file-read primitive. Only generated test
+        # media may be submitted.
+        try:
+            ok_path = Path(path).resolve().is_relative_to(Path(cfg.media_test).resolve())
+        except (OSError, ValueError):
+            ok_path = False
+        if not ok_path:
+            return _json({"error": "path outside test media dir"}, status=403)
+        try:
+            tg_id = int(body.get("tg_id") or 900000001)
+        except (TypeError, ValueError):
+            return _json({"error": "bad tg_id"}, status=400)
         try:
             async with submit_sem:
                 result = await engine.handle_submission(
-                    tg_id=int(body.get("tg_id") or 900000001),
+                    tg_id=tg_id,
                     chat_id=body.get("chat_id"),
                     source_msg_id=None,
                     status_msg_id=None,
@@ -263,8 +286,14 @@ def build_app(engine, db, cfg, state, redis_client=None) -> web.Application:
 
 
 async def start_internal_api(engine, db, cfg, state, redis_client=None,
-                             port: int = 8080) -> web.AppRunner:
-    runner = web.AppRunner(build_app(engine, db, cfg, state, redis_client))
+                             port: int = 8080) -> tuple[web.AppRunner, web.AppRunner]:
+    # One shared session store for BOTH apps: cookies are per-host, not
+    # per-port, so the internal (8091) and public (8090) panel apps must
+    # see the same sessions or listing/revocation/logout is split-brained.
+    shared_sessions: dict[str, dict] = {}
+
+    runner = web.AppRunner(
+        build_app(engine, db, cfg, state, redis_client, shared_sessions))
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -277,6 +306,7 @@ async def start_internal_api(engine, db, cfg, state, redis_client=None,
     panel_app["cfg"] = cfg
     panel_app["state"] = state
     panel_app["redis"] = redis_client
+    panel_app["panel_sessions"] = shared_sessions
     webpanel.setup(panel_app, engine, db, cfg, state)
     panel_runner = web.AppRunner(panel_app)
     await panel_runner.setup()
@@ -289,8 +319,14 @@ async def start_internal_api(engine, db, cfg, state, redis_client=None,
             ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ssl_ctx.load_cert_chain(crt, key)
             log.info("panel TLS enabled (self-signed)")
-    panel_site = web.TCPSite(panel_runner, "0.0.0.0", 8081, ssl_context=ssl_ctx)
+    if ssl_ctx is None:
+        # Fail closed: 8081 is docker-published on all host interfaces, and
+        # plain HTTP here would ship the one-time login key in cleartext.
+        # Without TLS the panel is loopback-only (reach it via SSH tunnel).
+        log.warning("panel TLS unavailable - binding panel site to loopback only")
+    panel_site = web.TCPSite(panel_runner, "0.0.0.0" if ssl_ctx else "127.0.0.1",
+                             8081, ssl_context=ssl_ctx)
     await panel_site.start()
-    log.info("panel site started on 0.0.0.0:8081",
-             extra={"detail": "tls" if ssl_ctx else "http"})
+    log.info("panel site started",
+             extra={"detail": ("tls 0.0.0.0" if ssl_ctx else "http 127.0.0.1") + ":8081"})
     return runner, panel_runner

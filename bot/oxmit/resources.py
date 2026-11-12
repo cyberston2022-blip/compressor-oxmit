@@ -10,14 +10,13 @@ Docker's fair-share scheduler distributes the static compose cap.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 
 from .config import Settings
 from .log import get_logger
 
 log = get_logger("oxmit.resources")
-
-CPU_PERIOD = 100000
 
 
 def cores_for(active: int, single: float, multi: float, floor: float) -> float:
@@ -59,8 +58,6 @@ class WorkerCpuTuner:
 
     async def tune(self, active: int) -> None:
         """Apply the per-worker quota for `active` running jobs (debounced)."""
-        import asyncio
-
         if self._disabled or active < 0:
             return
         target = cores_for(active, self.cfg.worker_cpu_single,
@@ -77,9 +74,12 @@ class WorkerCpuTuner:
             for name in self.cfg.worker_container_names:
                 try:
                     container = client.containers.get(name)
-                    # The compose stack creates workers with NanoCPUs set, and
-                    # the update API rejects mixing cpu_period with it — post
-                    # the NanoCPUs field directly.
+                    # DELIBERATE low-level API use (audit note: looks private,
+                    # is load-bearing): docker-py 7.x update_container() does
+                    # not expose NanoCPUs (only cpu_period/cpu_quota, which
+                    # the update API rejects while compose-set NanoCPUs is in
+                    # place). Posting the NanoCPUs field directly is the
+                    # documented workaround, not an accident.
                     url = client.api._url(
                         "/containers/{0}/update".format(container.id))
                     res = client.api._post_json(url, data=payload)
@@ -91,7 +91,9 @@ class WorkerCpuTuner:
             return updated
 
         updated = await asyncio.to_thread(_apply)
-        if updated:
+        # Mark the target applied only when EVERY worker got it: a partial
+        # update must be retried on the next poll instead of being forgotten.
+        if updated == len(self.cfg.worker_container_names):
             log.info("worker CPU quota tuned", extra={
                 "detail": f"active={active} cores={target} containers={updated}"})
             self._last = target

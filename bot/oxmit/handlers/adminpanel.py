@@ -60,7 +60,7 @@ def build_router(engine, db, cfg, state) -> Router:
     pending_mode: dict[int, tuple[str, float]] = {}   # admin id -> (mode, ts)
     pending_target: dict[int, int] = {}               # admin id -> target user id
     live_tasks: dict[int, asyncio.Task] = {}          # admin id -> monitor task
-    bcast_text: dict[int, str] = {}                   # admin id -> preview text
+    bcast_text: dict[int, tuple[str, float]] = {}      # admin id -> (preview text, ts)
 
     # ------------------------------------------------------------------
     # live monitor (unchanged behaviour)
@@ -248,6 +248,8 @@ def build_router(engine, db, cfg, state) -> Router:
 
     @router.message(F.text.startswith("/admin"))
     async def on_admin(message: Message):
+        if message.from_user is None:
+            return  # channel-auto posts carry no from_user
         if not await is_admin(db, cfg, message.from_user.id):
             await message.answer(tr("admin_denied"))
             return
@@ -800,8 +802,8 @@ def build_router(engine, db, cfg, state) -> Router:
     async def on_broadcast_go(callback: CallbackQuery):
         if not await _guard(callback):
             return
-        text = bcast_text.pop(callback.from_user.id, None)
-        if text is None:
+        entry = bcast_text.get(callback.from_user.id)
+        if entry is None:
             await callback.answer()
             return
         running = bcast_stop.get(callback.from_user.id)
@@ -809,6 +811,10 @@ def build_router(engine, db, cfg, state) -> Router:
             await callback.answer(tr("bcast_already_running", "fa"),
                                   show_alert=True)
             return
+        # Pop only after the running-check: on the "already running" path the
+        # text must survive so the admin does not have to retype it.
+        bcast_text.pop(callback.from_user.id, None)
+        text = entry[0]
         await callback.answer(tr("bcast_started", "fa"))
         engine.spawn(_broadcast_run(callback.from_user.id, text))
 
@@ -905,9 +911,18 @@ def build_router(engine, db, cfg, state) -> Router:
         if not text:
             await message.answer(tr("admin_broadcast_prompt", "fa"))
             return
+        if len(text) > 3800:
+            # Telegram's hard limit is 4096; a longer text fails for EVERY
+            # recipient mid-broadcast. Reject before the preview step.
+            await message.answer(
+                "❌ متن پیام " + str(len(text)) + " کاراکتر است؛ حداکثر مجاز ۳۸۰۰ است. "
+                "کوتاه‌ترش کنید و دوباره بفرستید.")
+            return
         recipients = await db.fetchval(
             "SELECT count(*) FROM users WHERE is_blocked = FALSE AND notify_done = TRUE")
-        bcast_text[message.from_user.id] = text
+        # (text, ts): the sweep prunes stale entries by timestamp - a bare
+        # str value used to crash the sweep with float - str every 10 min.
+        bcast_text[message.from_user.id] = (text, time.time())
         preview = text[:3000] + ("…" if len(text) > 3000 else "")
         await message.answer(
             tr("bcast_preview", "fa", n=recipients) + f"\n\n{preview}",
@@ -987,6 +1002,11 @@ def build_router(engine, db, cfg, state) -> Router:
         await db.set_config("force_sub",
                             {"enabled": True, "channel_id": channel_id, "link": link})
         forcesub.clear_cache()
+        # Audit parity: every other mutating panel action is audited; the
+        # force-sub switch gates all users and must be reviewable too.
+        await audit_mod.log_action(
+            db, "admin:" + str(message.from_user.id), "admin", "admin.fsub",
+            str(channel_id), f"link={link or '-'}", source="telegram")
         note = "" if link else "\n⚠️ برای این کانال لینکی پیدا نشد؛ دکمهٔ «عضویت» ساخته نمی‌شود (فقط دکمهٔ بررسی)."
         await message.answer(tr("admin_fsub_saved", "fa",
                                 channel=channel_id, link=link or "-") + note)
@@ -996,7 +1016,7 @@ def build_router(engine, db, cfg, state) -> Router:
         for uid in [u for u, (_, t) in pending_mode.items() if now - t > 600]:
             pending_mode.pop(uid, None)
             pending_target.pop(uid, None)
-        for uid in [u for u, t in bcast_text.items() if now - t > 600]:
+        for uid in [u for u, (_txt, t) in bcast_text.items() if now - t > 600]:
             bcast_text.pop(uid, None)
 
     router.sweep_pending = sweep_pending  # type: ignore[attr-defined]

@@ -16,6 +16,7 @@ from .db import Database
 from .encore_client import EncoreClient
 from .engine import JobEngine
 from .handlers import admin, adminpanel, intake, menu, settings
+from .handlers import merge_flow, nav, owner, personal
 from .internal_api import start_internal_api
 from .log import get_logger, setup_logging
 from .resources import WorkerCpuTuner
@@ -132,12 +133,25 @@ async def main() -> None:
     api_runners = await start_internal_api(engine, db, cfg, state, redis_client, port=8080)
 
     intake_router = intake.build_router(engine, db, cfg, state)
+    merge_router = merge_flow.build_router(engine, db, cfg, state)
     adminpanel_router = adminpanel.build_router(engine, db, cfg, state)
+    personal_router = personal.build_router(engine, db, cfg, state)
+    nav_router = nav.build_router(engine, db, cfg, state)
+    # The branding hub opens the personal editors via pr:* callbacks, so the
+    # nav router gets a bridge to the personal router's preview renderer.
+    nav_router.bind_personal_router(personal_router)  # type: ignore[attr-defined]
     dp = Dispatcher()
     dp.include_router(menu.build_router(engine, db, cfg, state))
     dp.include_router(settings.build_router(engine, db, cfg, state))
+    dp.include_router(nav_router)
+    dp.include_router(owner.build_router(engine, db, cfg, state))
+    dp.include_router(personal_router)
     dp.include_router(adminpanel_router)
     dp.include_router(admin.build_router(engine, db, cfg, state))
+    # merge router BEFORE intake: its DB-filtered video handler must see
+    # uploads from an active merge session first; everything else falls
+    # through to the standard intake flow.
+    dp.include_router(merge_router)
     dp.include_router(intake_router)
 
     await engine.recover_on_startup()
@@ -150,7 +164,8 @@ async def main() -> None:
     cpu_tuner = WorkerCpuTuner(cfg)
     background = [
         asyncio.create_task(poller_loop(engine, cpu_tuner, cfg)),
-        asyncio.create_task(sweep_loop(engine, intake_router, adminpanel_router)),
+        asyncio.create_task(sweep_loop(engine, intake_router, adminpanel_router,
+                                       merge_router, nav_router)),
         asyncio.create_task(engine.fingerprinter.run()),
     ]
 
@@ -163,6 +178,14 @@ async def main() -> None:
         for t in background:
             t.cancel()
         await asyncio.gather(*background, return_exceptions=True)
+        # Engine-spawned tasks (run_job from callbacks/panel, etc.) must be
+        # stopped BEFORE the pool/session they use are closed below - or they
+        # die with "Task was destroyed but it is pending" and leave jobs
+        # stuck in 'processing' until the next boot's recovery.
+        for t in list(engine._bg_tasks):
+            t.cancel()
+        if engine._bg_tasks:
+            await asyncio.gather(*engine._bg_tasks, return_exceptions=True)
         if 'api_runners' in locals() and api_runners:
             for r in api_runners:
                 try:

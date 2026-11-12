@@ -16,6 +16,8 @@ def build_router(engine, db, cfg, state) -> Router:
     router = Router(name="admin")
 
     async def guard(message: Message) -> bool:
+        if message.from_user is None:
+            return False  # channel-auto posts carry no from_user
         if not await is_admin(db, cfg, message.from_user.id):
             await message.answer(tr("admin_denied"))
             return False

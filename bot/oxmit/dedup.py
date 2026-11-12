@@ -46,6 +46,33 @@ async def find_reusable_parts(
     )
 
 
+async def find_cached_versions(db: asyncpg.Pool, sha256: str) -> list[asyncpg.Record]:
+    """Every cached version of a source identity, across ALL profiles.
+
+    Rows carry the output asset's ACTUAL probed metadata (dims, codecs,
+    bitrate) so the cache-offer card and the quality hierarchy never rely
+    on profile names. Callers resolve the source identity first (exact
+    sha, fuzzy match, or similarity) and pass that sha here.
+    """
+    return await db.fetch(
+        """
+        SELECT ar.id, ar.profile, ar.profile_version, ar.status,
+               ar.part_index, ar.part_total, ar.created_at,
+               mo.width AS out_w, mo.height AS out_h,
+               mo.duration_s AS out_duration, mo.size_bytes AS out_size,
+               mo.vcodec AS out_vcodec, mo.acodec AS out_acodec,
+               mo.bitrate AS out_bitrate, mo.tg_file_id AS out_tg_file_id
+        FROM archive_records ar
+        JOIN media_assets ms ON ms.id = ar.source_media_id
+        LEFT JOIN media_assets mo ON mo.id = ar.output_media_id
+        WHERE ms.sha256 = $1
+          AND ar.status IN ('active', 'no_gain')
+        ORDER BY ar.created_at, ar.part_index
+        """,
+        sha256,
+    )
+
+
 async def find_inflight_job(
     db: asyncpg.Pool, sha256: str, profile: str, version: int = 1
 ) -> asyncpg.Record | None:
@@ -106,6 +133,56 @@ async def find_fuzzy_archive(
         LIMIT 1
         """.format(lo=str(1 - _FUZZY_SIZE_TOL), hi=str(1 + _FUZZY_SIZE_TOL)),
         profile, size_bytes, name_norm,
+        max(0.0, duration_s - _FUZZY_WINDOW_S),
+        duration_s + _FUZZY_WINDOW_S,
+    )
+
+
+async def find_fuzzy_source(
+    db: asyncpg.Pool | asyncpg.Connection, *, size_bytes: int, name_norm: str, duration_s: float,
+    tg_id: int | None = None,
+) -> str | None:
+    """Sha of a fuzzily-identical source that has ANY cached version.
+
+    Profile-agnostic counterpart of find_fuzzy_archive, used by the cache
+    offer: the user may be offered a version compressed under a profile
+    they never picked. Same conservative gates (size ±2%, name, duration).
+    Scoped to the same user when tg_id is supplied to protect privacy.
+    """
+    if not size_bytes or not name_norm or not duration_s:
+        return None
+    if tg_id is not None:
+        return await db.fetchval(
+            """
+            SELECT ms.sha256 FROM media_assets ms
+            JOIN archive_records ar
+              ON ar.source_media_id = ms.id
+             AND ar.status IN ('active', 'no_gain')
+            WHERE ms.size_bytes BETWEEN ($1::numeric * {lo}) AND ($1::numeric * {hi})
+              AND ms.name_norm = $2
+              AND ms.duration_s BETWEEN $3 AND $4
+              AND EXISTS (SELECT 1 FROM jobs j WHERE j.media_id = ms.id AND j.requester_tg_id = $5)
+            ORDER BY ar.created_at DESC
+            LIMIT 1
+            """.format(lo=str(1 - _FUZZY_SIZE_TOL), hi=str(1 + _FUZZY_SIZE_TOL)),
+            size_bytes, name_norm,
+            max(0.0, duration_s - _FUZZY_WINDOW_S),
+            duration_s + _FUZZY_WINDOW_S,
+            tg_id,
+        )
+    return await db.fetchval(
+        """
+        SELECT ms.sha256 FROM media_assets ms
+        JOIN archive_records ar
+          ON ar.source_media_id = ms.id
+         AND ar.status IN ('active', 'no_gain')
+        WHERE ms.size_bytes BETWEEN ($1::numeric * {lo}) AND ($1::numeric * {hi})
+          AND ms.name_norm = $2
+          AND ms.duration_s BETWEEN $3 AND $4
+        ORDER BY ar.created_at DESC
+        LIMIT 1
+        """.format(lo=str(1 - _FUZZY_SIZE_TOL), hi=str(1 + _FUZZY_SIZE_TOL)),
+        size_bytes, name_norm,
         max(0.0, duration_s - _FUZZY_WINDOW_S),
         duration_s + _FUZZY_WINDOW_S,
     )

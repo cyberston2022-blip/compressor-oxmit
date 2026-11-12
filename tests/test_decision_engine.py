@@ -2,6 +2,7 @@
 
 import pytest
 from oxmit.decision_engine import (
+    HEVC_PROFILES,
     EncodingDecision,
     can_copy_audio,
     can_smart_bypass,
@@ -335,20 +336,20 @@ def test_is_already_compressed():
 
 def test_make_decision_rostam():
     probe_1080p = {
-        "filename": "compressed_lecture.mp4",
+        "filename": "lecture.mp4",
         "width": 1920,
         "height": 1080,
         "duration_s": 1200.0,
         "vcodec": "h264",
         "acodec": "aac",
         "audio_bitrate_kbps": 128,
-        "bitrate": 400000,
-        "size_bytes": 60 * 1024 * 1024,
+        "bitrate": 1500000,
+        "size_bytes": 200 * 1024 * 1024,
     }
     dec = make_decision(
         probe=probe_1080p,
         profile_key="rostam",
-        size_bytes=60 * 1024 * 1024,
+        size_bytes=200 * 1024 * 1024,
     )
     assert dec.action == "transcode"
     assert dec.effective_profile == "rostam"
@@ -357,5 +358,84 @@ def test_make_decision_rostam():
     assert dec.profile_params["crf"] == "32"
     assert dec.profile_params["preset"] == "superfast"
     assert dec.profile_params["audio_bitrate"] == "32k"
+
+
+def test_rostam_low_bitrate_protection():
+    # When source bitrate is already low (e.g. 400 kbps <= 650 kbps),
+    # CRF should adapt to 34 to prevent file size expansion (Issue 40c6fea6).
+    probe_low = {
+        "filename": "watermarked_lecture.mp4",
+        "width": 1280,
+        "height": 720,
+        "duration_s": 14591.0,
+        "vcodec": "h264",
+        "acodec": "aac",
+        "bitrate": 605000,
+        "size_bytes": 1104212705,
+    }
+    dec = make_decision(
+        probe=probe_low,
+        profile_key="rostam",
+        size_bytes=1104212705,
+    )
+    assert dec.effective_profile == "rostam"
+    assert dec.profile_params["crf"] == "34"
+
+
+def test_hevc_profiles_set():
+    expected = {"rostam", "edu360_hevc", "edu480_hevc", "maxcomp", "small", "level265"}
+    assert HEVC_PROFILES == expected
+
+
+def test_hevc_threading_multi_vs_single():
+    probe = {
+        "filename": "test.mp4",
+        "width": 1280,
+        "height": 720,
+        "duration_s": 60.0,
+        "vcodec": "h264",
+        "acodec": "aac",
+        "bitrate": 1500000,
+    }
+
+    # 1. Single-job HEVC: threads=1, pools=6:frame-threads=3
+    dec_single = make_decision(probe=probe, profile_key="small", size_bytes=50 * 1024 * 1024, active_jobs=1)
+    assert dec_single.effective_profile == "small"
+    assert dec_single.profile_params["threads"] == "1"
+    assert dec_single.profile_params["x265-params"] == "pools=6:frame-threads=3"
+    assert dec_single.profile_params["x265_params"] == "pools=6:frame-threads=3"
+
+    # 2. Multi-job HEVC: threads=1, pools=3:frame-threads=1
+    dec_multi = make_decision(probe=probe, profile_key="small", size_bytes=50 * 1024 * 1024, active_jobs=2)
+    assert dec_multi.effective_profile == "small"
+    assert dec_multi.profile_params["threads"] == "1"
+    assert dec_multi.profile_params["x265-params"] == "pools=3:frame-threads=1"
+    assert dec_multi.profile_params["x265_params"] == "pools=3:frame-threads=1"
+
+
+def test_x264_never_receives_x265_params():
+    probe = {
+        "filename": "clip.mp4",
+        "width": 1280,
+        "height": 720,
+        "duration_s": 60.0,
+        "vcodec": "h264",
+        "acodec": "aac",
+        "bitrate": 2000000,
+    }
+
+    for p_key in ("balanced", "highq", "tgcompat", "edu480", "r720", "level", "custom"):
+        for active in (1, 2):
+            dec = make_decision(
+                probe=probe,
+                profile_key=p_key,
+                size_bytes=50 * 1024 * 1024,
+                active_jobs=active,
+                target_mb=25 if p_key == "custom" else None,
+            )
+            assert "x265-params" not in dec.profile_params, f"Failed for {p_key} (active={active})"
+            assert "x265_params" not in dec.profile_params, f"Failed for {p_key} (active={active})"
+            expected_threads = "3" if active > 1 else "6"
+            assert dec.profile_params["threads"] == expected_threads, f"Failed threads for {p_key}"
 
 

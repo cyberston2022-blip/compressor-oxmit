@@ -22,6 +22,18 @@ from typing import Any
 
 log = logging.getLogger("oxmit.decision_engine")
 
+# The canonical set of HEVC/H.265 profiles supported in Oxmit.
+# Any profile outside this set is strictly treated as H.264/AVC and MUST NEVER
+# receive x265-params.
+HEVC_PROFILES: set[str] = {
+    "rostam",
+    "edu360_hevc",
+    "edu480_hevc",
+    "maxcomp",
+    "small",
+    "level265",
+}
+
 
 @dataclass
 class EncodingDecision:
@@ -300,6 +312,13 @@ def make_decision(
     educational_mode: bool = False,
 ) -> EncodingDecision:
     """The central decision engine evaluating the media and generating the optimal strategy."""
+    probe = dict(probe)
+    duration_s = float(probe.get("duration_s") or 0.0)
+    bitrate = int(probe.get("bitrate") or 0)
+    if bitrate <= 0 and size_bytes and duration_s > 0:
+        bitrate = int((size_bytes * 8) / duration_s)
+        probe["bitrate"] = bitrate
+
     content_cat = detect_content_category(probe)
     src_w = int(probe.get("width") or 0)
     src_h = int(probe.get("height") or 0)
@@ -455,8 +474,14 @@ def make_decision(
         target_h = th
         scale_filter = s_filt if s_filt else None
 
+        # Low bitrate protection: if source bitrate is already low (<= 650k),
+        # re-encoding with fixed CRF 32 superfast can cause a bitrate expansion (e.g. 605k -> 720k).
+        # Adaptively adjust CRF to 34 for low-bitrate sources to ensure size reduction.
+        src_bitrate = int(probe.get("bitrate") or 0)
+        crf_val = "34" if (0 < src_bitrate <= 650000) else "32"
+
         profile_params = {
-            "crf": "32",
+            "crf": crf_val,
             "preset": "superfast",
             "audio_bitrate": "32k",
         }
@@ -465,15 +490,31 @@ def make_decision(
         content_cat = "screen_text"
         rationale = (
             f"Rostam & Siavash Nuclear Mode: {src_w}x{src_h} -> {tw}x{th} via HEVC superfast "
-            f"(CRF 32, denoise hqdn3d, voice mono 32k audio)"
+            f"(CRF {crf_val}, denoise hqdn3d, voice mono 32k audio)"
         )
 
     else:
         chosen_profile = profile_key
         rationale = f"Standard profile: {profile_key}"
 
-    if profile_params:
-        threads = settings.ffmpeg_threads_multi if (settings and active_jobs > 1) else (settings.ffmpeg_threads_single if settings else 6)
+    is_hevc = chosen_profile in HEVC_PROFILES
+    if is_hevc:
+        if active_jobs > 1:
+            profile_params["threads"] = "1"
+            profile_params["x265-params"] = "pools=3:frame-threads=1"
+            profile_params["x265_params"] = "pools=3:frame-threads=1"
+        else:
+            profile_params["threads"] = "1"
+            profile_params["x265-params"] = "pools=6:frame-threads=3"
+            profile_params["x265_params"] = "pools=6:frame-threads=3"
+    else:
+        # Strict isolation: x264 MUST NEVER receive x265 parameters
+        profile_params.pop("x265-params", None)
+        profile_params.pop("x265_params", None)
+        if settings:
+            threads = settings.ffmpeg_threads_multi if active_jobs > 1 else settings.ffmpeg_threads_single
+        else:
+            threads = 3 if active_jobs > 1 else 6
         profile_params["threads"] = str(threads)
 
     return EncodingDecision(

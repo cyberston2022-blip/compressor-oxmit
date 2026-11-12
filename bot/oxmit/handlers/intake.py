@@ -21,7 +21,10 @@ from aiogram.types import (
 
 from .. import forcesub
 from .. import media as media_mod
+from .. import permissions as perms
+from .. import quality as quality_mod
 from ..decision_engine import is_already_compressed, select_educational_resolution
+from ..dedup import find_cached_versions, find_fuzzy_source
 from ..engine import AdmissionError, _as_uuid
 from ..estimate import estimate_output_bytes
 from ..log import get_logger
@@ -29,6 +32,7 @@ from ..media import human_size
 from ..profiles import BY_KEY, PROFILES
 from ..texts import reject_text, tr
 from .common import ensure_user, is_admin
+from .nav import send_denial
 
 log = get_logger("oxmit.intake")
 
@@ -77,7 +81,8 @@ def _parse_level(raw: str) -> int | None:
         text = text.replace(token, " ").strip()
     try:
         value = int(float(text))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: "1e400" parses as inf; int(inf) is not a ValueError.
         return None
     return value if 1 <= value <= 20 else None
 
@@ -88,6 +93,8 @@ def build_router(engine, db, cfg, state) -> Router:
     percent_pending: dict[int, PendingPick] = {}  # tg_id -> pick, waiting for a number
     pending: dict[str, PendingPick] = {}          # admin profile-grid keys
     pending_custom: dict[int, tuple[PendingPick, float]] = {}  # admin target size
+    # cache-offer flow (CACHE-01): offer key -> {pick, offer, created}
+    pending_offers: dict[str, dict] = {}
 
     def _kb_profile_grid(prefix: str, key_id: str, lang: str) -> InlineKeyboardMarkup:
         rows = []
@@ -113,11 +120,84 @@ def build_router(engine, db, cfg, state) -> Router:
                                  callback_data=f"canc:{job_id}"),
         ]])
 
+    def _offer_text(offer: dict, lang: str) -> str:
+        """Cache-offer card: DETECTED values from the stored output's probe.
+
+        Anything the output asset does not know is shown as unavailable -
+        nothing is estimated or invented (spec section 6).
+        """
+        best = offer["best"]
+        short = quality_mod.version_short_side(best.get("out_w"), best.get("out_h"))
+        if short and best.get("out_w") and best.get("out_h"):
+            res = f"{short}p ({best['out_w']}×{best['out_h']})"
+        else:
+            res = tr("info_unavailable", lang)
+        dur = best.get("out_duration")
+        dur_s = (time.strftime("%H:%M:%S", time.gmtime(dur))
+                 if dur else tr("info_unavailable", lang))
+        vc = (best.get("out_vcodec") or tr("info_unavailable", lang)).upper()
+        ac = (best.get("out_acodec") or tr("info_unavailable", lang)).upper()
+        prof = BY_KEY.get(best["profile"])
+        if prof:
+            ptitle = prof.title_fa if lang != "en" else prof.title
+        else:
+            ptitle = best["profile"]
+        lines = [
+            tr("cache_offer_title", lang),
+            "",
+            tr("cache_quality", lang, res=res),
+            tr("cache_duration", lang, dur=dur_s),
+            tr("cache_size", lang, size=human_size(best.get("out_size"))),
+            tr("cache_vcodec", lang, codec=vc),
+            tr("cache_acodec", lang, codec=ac),
+            tr("cache_profile", lang, profile=ptitle),
+        ]
+        extra = len(offer["versions"]) - 1
+        if extra > 0:
+            lines.append("")
+            lines.append(tr("cache_versions_more", lang, n=extra))
+        lines.append("")
+        lines.append(tr("cache_offer_question", lang))
+        return "\n".join(lines)
+
+    def _kb_restricted(key_id: str, profile_keys: list[str],
+                       lang: str) -> InlineKeyboardMarkup | None:
+        """Grid limited to the given (quality-restricted) profile keys."""
+        rows, row = [], []
+        for key in profile_keys:
+            prof = BY_KEY.get(key)
+            if prof is None or key == "custom":
+                continue
+            row.append(InlineKeyboardButton(
+                text=prof.title_fa if lang != "en" else prof.title,
+                callback_data=f"cq:{key_id}:{key}"))
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        if not rows:
+            return None
+        rows.append([InlineKeyboardButton(text=tr("btn_cancel_job", lang),
+                                          callback_data="cmp:stop")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    def _offer_kb(key: str, lang: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=tr("btn_use_cached", lang),
+                                  callback_data=f"reuse:{key}")],
+            [InlineKeyboardButton(text=tr("btn_other_profile", lang),
+                                  callback_data=f"cprof:{key}")],
+            [InlineKeyboardButton(text=tr("btn_cancel_job", lang),
+                                  callback_data="cmp:stop")],
+        ])
+
     def _reject(code: str, lang: str, **fmt) -> str:
         return reject_text(code, lang, **fmt)
 
     async def submit_now(pick: PendingPick, profile_key: str,
-                         target_mb: int | None = None, level: int | None = None) -> None:
+                         target_mb: int | None = None, level: int | None = None,
+                         allow_reuse: bool = True) -> None:
         user = await db.fetchrow("SELECT language FROM users WHERE tg_id = $1", pick.tg_id)
         lang = (user["language"] if user else None) or "fa"
         status = None
@@ -138,6 +218,7 @@ def build_router(engine, db, cfg, state) -> Router:
                 file_unique_id=pick.file_unique_id,
                 target_mb=target_mb,
                 compress_level=level,
+                allow_reuse=allow_reuse,
             )
         except AdmissionError as exc:
             text = _reject(exc.code, lang, **exc.fmt)
@@ -162,6 +243,24 @@ def build_router(engine, db, cfg, state) -> Router:
                     pass
             return
         outcome = result["outcome"]
+        if outcome == "offer" and status:
+            # CACHE-01: explicit choice - reuse, lower profile, or cancel.
+            key = uuid_mod.uuid4().hex[:10]
+            pending_offers[key] = {"pick": pick, "offer": result,
+                                   "created": time.time()}
+            if len(pending_offers) > 5000:
+                oldest = sorted(pending_offers, key=lambda k: pending_offers[k]["created"])
+                for k in oldest[:1000]:
+                    pending_offers.pop(k, None)
+            try:
+                await engine.bot.edit_message_text(
+                    chat_id=pick.chat_id, message_id=status.message_id,
+                    text=_offer_text(result, lang),
+                    reply_markup=_offer_kb(key, lang),
+                )
+            except TelegramAPIError:
+                pass
+            return
         queue_note = ""
         if outcome == "queued" and result.get("job_id"):
             try:
@@ -305,9 +404,9 @@ def build_router(engine, db, cfg, state) -> Router:
             limit_note="",
             dur=dur or tr("info_unavailable", lang),
             res=res,
-            codec=(pick.mime or tr("info_unavailable", lang))[:24],
-            kind=kind,
-        )
+        ) + "\n" + tr("info_details", lang,
+                      codec=(pick.mime or tr("info_unavailable", lang))[:24],
+                      kind=kind)
 
         # --- Pre-analysis: Check if already compressed ---
         probe_dict = {
@@ -321,7 +420,65 @@ def build_router(engine, db, cfg, state) -> Router:
         if already_comp:
             percent_pending.pop(pick.tg_id, None)
             video_pending[pick.tg_id] = pick
+            # Combined decision card (UX spec §17): when a cached version of
+            # this source is discoverable (fuzzy identity match, BEFORE any
+            # hashing), merge the "already compressed" warning and the cache
+            # offer into ONE card. Without a cache hit, keep the single
+            # concise warning card (Rostam / remux).
             warn_card = tr("already_compressed_warning", lang, reason=comp_reason)
+            fuzzy_sha = None
+            try:
+                name_norm = media_mod.sanitize_filename(
+                    pick.filename or "video").lower()
+                fuzzy_sha = await find_fuzzy_source(
+                    db, size_bytes=pick.size, name_norm=name_norm,
+                    duration_s=pick.duration or 0.0)
+            except Exception:  # noqa: BLE001 - pre-analysis is best-effort
+                fuzzy_sha = None
+            if fuzzy_sha:
+                try:
+                    versions = quality_mod.group_versions(
+                        await find_cached_versions(db, fuzzy_sha))
+                    best = quality_mod.pick_best_version(versions)
+                except Exception:  # noqa: BLE001
+                    best = None
+                if best is not None:
+                    key = uuid_mod.uuid4().hex[:10]
+                    pending_offers[key] = {
+                        "pick": pick, "created": time.time(),
+                        "offer": {
+                            "sha": fuzzy_sha, "reuse_kind": "fuzzy",
+                            "best": best, "versions": versions,
+                            "probe": {"width": pick.width,
+                                      "height": pick.height,
+                                      "duration_s": pick.duration},
+                        },
+                    }
+                    if len(pending_offers) > 5000:
+                        oldest = sorted(pending_offers,
+                                        key=lambda k: pending_offers[k]["created"])
+                        for k in oldest[:1000]:
+                            pending_offers.pop(k, None)
+                    offer_text = _offer_text({
+                        "best": best, "versions": versions,
+                    }, lang)
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text=tr("btn_use_cached", lang),
+                            callback_data=f"reuse:{key}")],
+                        [InlineKeyboardButton(
+                            text=tr("btn_other_profile", lang),
+                            callback_data=f"cprof:{key}")],
+                        [InlineKeyboardButton(text=tr("btn_rostam", lang),
+                                              callback_data="cmp:rostam")],
+                        [InlineKeyboardButton(text=tr("btn_cancel_job", lang),
+                                              callback_data="cmp:stop")],
+                    ])
+                    await message.answer(
+                        f"{card}\n\n♻️ {tr('cache_offer_title', lang)}\n\n"
+                        f"{offer_text}\n\n⚠️ {tr('already_comp_short', lang)}",
+                        reply_markup=kb)
+                    return
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=tr("btn_rostam", lang), callback_data="cmp:rostam")],
                 [InlineKeyboardButton(text=tr("btn_send_original", lang), callback_data="cmp:remux")],
@@ -354,7 +511,7 @@ def build_router(engine, db, cfg, state) -> Router:
         btn_480_text = tr("btn_edu480", lang, cut=cut_480, mb=mb_480)
         btn_360_text = tr("btn_edu360", lang, cut=cut_360, mb=mb_360)
         btn_cust_text = tr("btn_custom_target", lang)
-        btn_level_text = tr("btn_compress", lang) + " (درجه ۱-۲۰)"
+        btn_level_text = tr("btn_level", lang)
 
         panel_kb = [
             [InlineKeyboardButton(text=btn_480_text, callback_data="cmp:edu480")],
@@ -367,10 +524,19 @@ def build_router(engine, db, cfg, state) -> Router:
             percent_pending.pop(pick.tg_id, None)
             video_pending[pick.tg_id] = pick
             key = _register_pending(pick)
-            kb = _kb_profile_grid("pk", key, lang)
-            for row in reversed(panel_kb):
-                kb.inline_keyboard.insert(0, row)
-            await message.answer(card + "\n\n" + tr("choose_profile_for", lang), reply_markup=kb)
+            # Owner-managed permission (spec 10): the admin profile grid is a
+            # compression.use feature; without it an admin sees the standard
+            # user panel. Backend re-check on the pk: callback as well.
+            if await perms.has_perm(engine, message.from_user.id, "compression.use"):
+                kb = _kb_profile_grid("pk", key, lang)
+                for row in reversed(panel_kb):
+                    kb.inline_keyboard.insert(0, row)
+                await message.answer(card + "\n\n" + tr("choose_profile_for", lang),
+                                     reply_markup=kb)
+            else:
+                await message.answer(
+                    card + "\n\n" + tr("choose_profile_for", lang),
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=panel_kb))
             return
 
         percent_pending.pop(pick.tg_id, None)
@@ -380,33 +546,18 @@ def build_router(engine, db, cfg, state) -> Router:
             reply_markup=InlineKeyboardMarkup(inline_keyboard=panel_kb),
         )
 
-    # ---- educational button handlers (480p and 360p) ----
-    @router.callback_query(F.data.in_({"cmp:edu", "cmp:edu480", "cmp:edu360"}))
-    async def on_compress_edu_btn(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        pick = video_pending.get(callback.from_user.id)
-        lang = await engine._lang(callback.from_user.id)
-        if pick is None:
-            await callback.answer(tr("cancel_expired", lang), show_alert=True)
-            return
-        await callback.answer()
-        percent_pending.pop(callback.from_user.id, None)
-        try:
-            await engine.bot.edit_message_reply_markup(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                reply_markup=None,
-            )
-        except TelegramAPIError:
-            pass
-        target_prof = "edu360" if callback.data == "cmp:edu360" else "edu480"
-        await submit_now(pick, target_prof)
+    # ---- direct-profile buttons (edu/rostam/remux): one mapped handler ----
+    # These three handlers were byte-identical except the target profile;
+    # a dispatch table replaces the copy-paste trio (keeps exact behavior).
+    _CMP_PROFILE_BTNS = {
+        "cmp:edu480": "edu480",
+        "cmp:edu360": "edu360",
+        "cmp:rostam": "rostam",
+        "cmp:remux": "remux",
+    }
 
-    # ---- Rostam & Siavash extreme compression handler ----
-    @router.callback_query(F.data == "cmp:rostam")
-    async def on_compress_rostam_btn(callback: CallbackQuery):
+    @router.callback_query(F.data.in_(set(_CMP_PROFILE_BTNS)))
+    async def on_compress_profile_btn(callback: CallbackQuery):
         if _throttled(callback):
             await callback.answer()
             return
@@ -425,30 +576,7 @@ def build_router(engine, db, cfg, state) -> Router:
             )
         except TelegramAPIError:
             pass
-        await submit_now(pick, "rostam")
-
-    # ---- Remux (send original) handler ----
-    @router.callback_query(F.data == "cmp:remux")
-    async def on_compress_remux_btn(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        pick = video_pending.get(callback.from_user.id)
-        lang = await engine._lang(callback.from_user.id)
-        if pick is None:
-            await callback.answer(tr("cancel_expired", lang), show_alert=True)
-            return
-        await callback.answer()
-        percent_pending.pop(callback.from_user.id, None)
-        try:
-            await engine.bot.edit_message_reply_markup(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                reply_markup=None,
-            )
-        except TelegramAPIError:
-            pass
-        await submit_now(pick, "remux")
+        await submit_now(pick, _CMP_PROFILE_BTNS[callback.data])
 
     # ---- custom size prompt handler (for all users) ----
     @router.callback_query(F.data == "cmp:cust_prompt")
@@ -525,6 +653,9 @@ def build_router(engine, db, cfg, state) -> Router:
     # ---- compress button -> ask for the compression level ----
     @router.callback_query(F.data == "cmp:go")
     async def on_compress_btn(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
         if callback.message is None:
             return
         pick = video_pending.get(callback.from_user.id)
@@ -566,6 +697,144 @@ def build_router(engine, db, cfg, state) -> Router:
             except TelegramAPIError:
                 pass
 
+    # ---- cache-offer flow (CACHE-01): send existing / lower profile / cancel ----
+    def _offer_owner_ok(entry: dict, callback: CallbackQuery) -> bool:
+        pick = entry.get("pick")
+        return bool(pick and callback.from_user and pick.tg_id == callback.from_user.id)
+
+    def _fresh_grid_for(offer: dict, key: str, lang: str) -> InlineKeyboardMarkup | None:
+        """Feasible (no-upscale) grid when the cached version proved unusable.
+
+        No cache restriction here: the version we offered just failed to
+        deliver, so the user may pick any profile the real source supports.
+        """
+        probe = offer.get("probe") or {}
+        allowed = quality_mod.allowed_profiles_for_source(
+            [p.key for p in PROFILES], probe.get("width"), probe.get("height"))
+        return _kb_restricted(key, allowed, lang)
+
+    @router.callback_query(F.data.startswith("reuse:"))
+    async def on_use_cached(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        key = callback.data.split(":", 1)[1]
+        entry = pending_offers.pop(key, None)
+        lang = await engine._lang(callback.from_user.id)
+        if entry is None or callback.message is None:
+            await callback.answer(tr("cache_gone", lang), show_alert=True)
+            return
+        if not _offer_owner_ok(entry, callback):
+            pending_offers[key] = entry
+            await callback.answer(tr("admin_denied", lang), show_alert=True)
+            return
+        await callback.answer(tr("cache_delivering", lang))
+        try:
+            await engine.bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=None,
+            )
+        except TelegramAPIError:
+            pass
+        offer = entry["offer"]
+        pick = entry["pick"]
+        best = offer["best"]
+        result = await engine.deliver_cached_offer(
+            sha=offer["sha"], profile_key=best["profile"],
+            profile_version=best.get("profile_version", 1),
+            reuse_kind=offer.get("reuse_kind", "exact"),
+            tg_id=pick.tg_id, chat_id=pick.chat_id,
+            status_msg_id=callback.message.message_id,
+            size_bytes=pick.size,
+        )
+        if result.get("outcome") == "cache_gone" or not result.get("delivered", True):
+            # Recover gracefully: the stored Telegram file is gone - mark it
+            # (done inside engine) and let the user start a fresh encode.
+            new_key = uuid_mod.uuid4().hex[:10]
+            pending_offers[new_key] = {**entry, "created": time.time()}
+            kb = _fresh_grid_for(offer, new_key, lang)
+            text = tr("cache_unavailable", lang)
+            if kb is None:
+                text += "\n" + tr("cache_none_available", lang)
+            try:
+                await engine.bot.send_message(
+                    pick.chat_id, text,
+                    reply_markup=kb,
+                )
+            except TelegramAPIError:
+                pass
+
+    @router.callback_query(F.data.startswith("cprof:"))
+    async def on_choose_other_profile(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        key = callback.data.split(":", 1)[1]
+        entry = pending_offers.get(key)
+        lang = await engine._lang(callback.from_user.id)
+        if entry is None or callback.message is None:
+            await callback.answer(tr("cache_gone", lang), show_alert=True)
+            return
+        if not _offer_owner_ok(entry, callback):
+            await callback.answer(tr("admin_denied", lang), show_alert=True)
+            return
+        offer = entry["offer"]
+        probe = offer.get("probe") or {}
+        cached_short = quality_mod.version_short_side(
+            offer["best"].get("out_w"), offer["best"].get("out_h"))
+        allowed = quality_mod.allowed_profiles(
+            [p.key for p in PROFILES], probe.get("width"), probe.get("height"),
+            cached_short)
+        kb = _kb_restricted(key, allowed, lang)
+        await callback.answer()
+        if kb is None:
+            await callback.answer(tr("cache_none_available", lang), show_alert=True)
+            return
+        try:
+            await engine.bot.edit_message_text(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                text=tr("restricted_grid_title", lang) + "\n\n"
+                     + tr("restricted_grid_note", lang),
+                reply_markup=kb,
+            )
+        except TelegramAPIError:
+            pass
+
+    @router.callback_query(F.data.startswith("cq:"))
+    async def on_restricted_pick(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        try:
+            _, key, profile_key = callback.data.split(":", 2)
+        except ValueError:
+            return
+        if profile_key not in BY_KEY:
+            return
+        entry = pending_offers.pop(key, None)
+        lang = await engine._lang(callback.from_user.id)
+        if entry is None or callback.message is None:
+            await callback.answer(tr("cache_gone", lang), show_alert=True)
+            return
+        if not _offer_owner_ok(entry, callback):
+            pending_offers[key] = entry
+            await callback.answer(tr("admin_denied", lang), show_alert=True)
+            return
+        await callback.answer()
+        try:
+            await engine.bot.edit_message_reply_markup(
+                chat_id=callback.message.chat.id,
+                message_id=callback.message.message_id,
+                reply_markup=None,
+            )
+        except TelegramAPIError:
+            pass
+        # allow_reuse=False: the user explicitly declined the cached version,
+        # so never re-offer or silently reuse - encode fresh.
+        await submit_now(entry["pick"], profile_key, allow_reuse=False)
+
     def _waiting_percent(message: Message) -> bool:
         return message.from_user is not None and message.from_user.id in percent_pending
 
@@ -587,17 +856,39 @@ def build_router(engine, db, cfg, state) -> Router:
     # ---- admin: profile picked from the grid ----
     @router.callback_query(F.data.startswith("pk:"))
     async def on_profile_pick(callback: CallbackQuery):
-        await callback.answer()
+        if _throttled(callback):
+            await callback.answer()
+            return
         try:
             _, key_id, profile_key = callback.data.split(":", 2)
         except ValueError:
             return
-        pick = pending.pop(key_id, None)
-        if pick is None or callback.message is None:
-            return
         if profile_key not in BY_KEY:
             return
-        lang = await db.fetchval("SELECT language FROM users WHERE tg_id = $1", pick.tg_id) or "fa"
+        pick = pending.pop(key_id, None)
+        if pick is None or callback.message is None:
+            await callback.answer(tr("cancel_expired", "fa"), show_alert=True)
+            return
+        # Ownership: in a group any member sees the admin's grid buttons;
+        # without this check a member could spend the admin's quota or
+        # hijack pending_custom with their own next numeric message.
+        if pick.tg_id != callback.from_user.id and not await is_admin(
+            db, cfg, callback.from_user.id
+        ):
+            await callback.answer(tr("admin_denied", "fa"), show_alert=True)
+            return
+        # Backend permission gate (spec 3.3): the grid being visible is not
+        # the authorization.
+        if not await perms.has_perm(engine, callback.from_user.id, "compression.use"):
+            await callback.answer(
+                tr("perm_denied", "fa", perm=perms.PERM_LABELS_FA["compression.use"]),
+                show_alert=True)
+            if callback.message is not None:
+                await send_denial(
+                    engine, db, callback.message.chat.id,
+                    callback.from_user.id, "compression.use")
+            return
+        lang = await engine._lang(callback.from_user.id)
         try:
             await engine.bot.edit_message_reply_markup(
                 chat_id=callback.message.chat.id,
@@ -620,8 +911,8 @@ def build_router(engine, db, cfg, state) -> Router:
     @router.message(F.text, _has_custom_pending)
     async def on_custom_size(message: Message):
         pick, _ts = pending_custom.pop(message.from_user.id, None)
-        lang = await db.fetchval("SELECT language FROM users WHERE tg_id = $1", pick.tg_id) or "fa"
-        raw = (message.text or "").strip().replace(",", "").lower()
+        lang = await engine._lang(message.from_user.id)
+        raw = (message.text or "").strip().replace(",", "").lower().translate(_PERSIAN_DIGITS)
         try:
             if raw.endswith("gb") or raw.endswith("g"):
                 target_mb = int(float(raw.rstrip("gb").rstrip("g")) * 1024)
@@ -629,7 +920,8 @@ def build_router(engine, db, cfg, state) -> Router:
                 target_mb = int(float(raw.rstrip("mb").rstrip("m")))
             else:
                 target_mb = int(float(raw))
-        except ValueError:
+        except (ValueError, OverflowError):
+            # OverflowError: "inf"/"1e400" are valid floats but not ints.
             await message.answer(_reject("bad_target", lang, detail=raw[:20]))
             return
         if not (cfg.target_min_mb <= target_mb <= cfg.target_max_gb * 1024):
@@ -765,6 +1057,8 @@ def build_router(engine, db, cfg, state) -> Router:
 
     @router.message(F.forward_origin)
     async def on_forward(message: Message):
+        if message.from_user is None:
+            return  # auto-forward from a linked channel has no from_user
         origin = message.forward_origin
         chat = getattr(origin, "chat", None)
         if chat is None or chat.type != "channel":
@@ -838,6 +1132,9 @@ def build_router(engine, db, cfg, state) -> Router:
         now = time.time()
         for uid in [u for u, (_, t) in pending_custom.items() if now - t > 600]:
             pending_custom.pop(uid, None)
+        # cache offers: same one-hour window as the other pending states
+        for key in [k for k, v in pending_offers.items() if v["created"] < cutoff]:
+            pending_offers.pop(key, None)
         # archive proposals: 30-minute confirm window (SPEC-05)
         for uid in [u for u, (_k, _c, t) in pending_archive_chat.items()
                     if now - t > 1800]:

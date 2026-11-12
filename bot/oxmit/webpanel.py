@@ -22,6 +22,7 @@ import os
 import secrets
 import shutil
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 
@@ -85,6 +86,7 @@ def _check_cookie(token: str, raw: str, sessions: dict) -> dict | None:
     except (ValueError, TypeError):
         return None
     if exp < int(time.time()):
+        sessions.pop(sid, None)
         return None
     if not hmac_mod.compare_digest(_sign(token, f"{sid}:{exp}"), sig):
         return None
@@ -205,7 +207,7 @@ def _elapsed_s(started):
 async def active_data(db) -> list:
     rows = await db.fetch(
         """
-        SELECT left(j.id::text, 8) AS jid, j.progress, j.profile, j.stage,
+        SELECT j.id::text AS id, left(j.id::text, 8) AS jid, j.progress, j.profile, j.stage,
                j.source_size, j.enqueued_at, j.started_at, j.requester_tg_id AS tg,
                u.first_name, u.username, u.is_vip,
                m.filename AS fname, m.duration_s
@@ -222,6 +224,7 @@ async def active_data(db) -> list:
         fname = r["fname"] or ""
         ext = ("." + fname.rsplit(".", 1)[-1].lower()) if "." in fname else ""
         out.append({
+            "id": r["id"],          # full id: the cancel action needs a castable uuid
             "jid": r["jid"],
             "name": (fname or (r["first_name"] or "?"))[:40],
             "tg": r["tg"],
@@ -575,7 +578,11 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
     async def audit_list(request: web.Request) -> web.Response:
         if not _session(request):
             return _json({"error": "unauthorized"}, 401)
-        rows = await audit_mod.recent(db, limit=int(request.query.get("limit", "50")),
+        try:
+            limit = int(request.query.get("limit", "50"))
+        except (TypeError, ValueError):
+            limit = 50
+        rows = await audit_mod.recent(db, limit=limit,
                                       action=request.query.get("action") or None)
         out = [{"ts": r["ts"].isoformat(), "actor": r["actor"], "role": r["role"],
                 "action": r["action"], "target": r["target"], "details": r["details"],
@@ -597,6 +604,12 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             return _json({"error": "unauthorized"}, 401)
         action = request.match_info["action"]
         jid = request.match_info["job_id"]
+        try:
+            # A malformed id must be a 400, never a Postgres cast 500
+            # (the dashboard once shipped truncated 8-char ids here).
+            uuid.UUID(jid)
+        except (ValueError, AttributeError, TypeError):
+            return _json({"error": "bad job id"}, 400)
         if action == "cancel":
             row = await db.fetchrow(
                 "SELECT * FROM jobs WHERE id = $1::uuid AND status IN ('queued','processing')", jid)
@@ -643,8 +656,11 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             return _json({"error": "bad id"}, 400)
         if action in ("ban", "vip"):
             column = "is_blocked" if action == "ban" else "is_vip"
-            new = bool(await db.fetchval(
-                f"UPDATE users SET {column} = NOT {column} WHERE tg_id = $1 RETURNING {column}", tg_id))
+            new = await db.fetchval(
+                f"UPDATE users SET {column} = NOT {column} WHERE tg_id = $1 RETURNING {column}", tg_id)
+            if new is None:
+                return _json({"error": "user not found"}, 404)
+            new = bool(new)
             await audit_mod.log_action(db, session["actor"], "admin", f"user.{action}",
                                        tg_id, f"new={new}", "web", _ip(request))
             return _json({"ok": True, "new": new})
@@ -764,13 +780,18 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
 
     # ---- WebSocket live feed ----
     async def ws_handler(request: web.Request) -> web.StreamResponse:
-        if not _session(request):
+        session = _session(request)
+        if not session:
             return _json({"error": "unauthorized"}, 401)
         ws = web.WebSocketResponse(heartbeat=25.0)
         await ws.prepare(request)
         log.info("panel ws connected")
         try:
             while True:
+                # A revoked session must stop receiving dashboard data
+                # (the cookie is checked once at handshake only).
+                if _session(request) is not session:
+                    break
                 events = await audit_mod.recent(db, limit=8)
                 payload = {"summary": await summary_data(engine, db, cfg, state),
                            "active": await active_data(db),
@@ -806,7 +827,8 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
     app.router.add_post("/panel/api/user/{tg_id}/{action}", user_action)
     app.router.add_post("/panel/api/system/{action}", system_action)
     app.router.add_get("/panel/ws", ws_handler)
-    log.info("panel v2 enabled at /panel (localhost only, manage+audit)")
+    log.info("panel v2 enabled at /panel (manage+audit; public site on :8081 "
+             "via docker port 8090, internal app on :8080)")
 
 
 _LOGIN_PAGE = """<!doctype html><html dir="rtl" lang="fa"><head><meta charset="utf-8">
@@ -1147,7 +1169,7 @@ return '<div class="task"><div class="pct">'+fa(t.progress)+'٪</div><div style=
 (t.vip?'<span class="badge b-purple">💎 VIP</span>':'')+'<span class="badge b-gray">'+esc(t.profile)+'</span></div>'+
 '<div class="track" style="margin-top:6px"><div class="fill striped" style="width:'+Math.max(2,t.progress)+'%"></div></div>'+
 '<div class="meta"><span>کاربر '+(t.username?'@'+esc(t.username):t.tg)+'</span><span>⏱ '+fmtDur(t.elapsed_s)+'</span>'+(speed?'<span>⚡ '+speed.toFixed(1)+'x</span>':'')+'<span>🔹 '+esc(t.stage||'')+'</span></div></div>'+
-(t.progress<100?'<button class="btn xs danger" data-act="cancel" data-jid="'+esc(t.jid)+'">لغو</button>':'')+'</div>'}).join('')}
+(t.progress<100?'<button class="btn xs danger" data-act="cancel" data-jid="'+esc(t.id)+'">لغو</button>':'')+'</div>'}).join('')}
 function renderEvents(evts){const el=$('#events');
 el.innerHTML=(evts&&evts.length?evts:[]).map(e=>'<div class="it"><time>'+esc((e.ts||'').slice(11,19))+'</time><span>'+
 esc(actionLabel(e.action))+(e.target?' — <b class="mono">'+esc(String(e.target).slice(0,10))+'</b>':'')+
