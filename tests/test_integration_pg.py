@@ -247,7 +247,11 @@ async def test_full_lifecycle(env):
     ar = await db.fetchrow("SELECT * FROM archive_records WHERE output_media_id = $1",
                            done["output_media_id"])
     assert ar["status"] == "active" and ar["profile"] == "edu480"
-    # Local Bot API source deleted after delivery
+    # Local Bot API source deleted after delivery (right after delivered_at)
+    for _ in range(100):
+        if not Path(done["source_path"]).exists():
+            break
+        await asyncio.sleep(0.02)
     assert not Path(done["source_path"]).exists()
 
     # --- early recognition: same Telegram file later -> reuse, no download
