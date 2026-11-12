@@ -42,11 +42,12 @@ async def test_flood_safe_retries_once():
 
 
 @pytest.mark.asyncio
-async def test_deliver_result_forward_success():
+async def test_deliver_result_copies_without_forward_attribution():
     engine = MagicMock()
     msg = MagicMock()
     msg.message_id = 999
-    engine.bot.forward_message = AsyncMock(return_value=msg)
+    engine.bot.copy_message = AsyncMock(return_value=msg)
+    engine.bot.forward_message = AsyncMock()
 
     ok, method, mid = await deliver_result(
         engine,
@@ -55,16 +56,18 @@ async def test_deliver_result_forward_success():
         archive_channel_id=-100123,
     )
     assert ok is True
-    assert method == "forward"
+    assert method == "copy"
     assert mid == 999
-    engine.bot.forward_message.assert_awaited_once()
+    engine.bot.copy_message.assert_awaited_once()
+    # The private storage channel must never show up as "forwarded from".
+    engine.bot.forward_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_deliver_result_fallback_to_file_id_when_forward_not_found():
+async def test_deliver_result_fallback_to_file_id_when_archive_message_gone():
     engine = MagicMock()
-    engine.bot.forward_message = AsyncMock(
-        side_effect=TelegramBadRequest(method=MagicMock(), message="message to forward not found")
+    engine.bot.copy_message = AsyncMock(
+        side_effect=TelegramBadRequest(method=MagicMock(), message="message to copy not found")
     )
     msg = MagicMock()
     msg.message_id = 888

@@ -27,6 +27,7 @@ from aiogram.types import (
     Message,
 )
 
+from .. import media as media_mod
 from .. import merge as merge_mod
 from .. import permissions as perms
 from ..log import get_logger
@@ -129,8 +130,9 @@ def build_router(engine, db, cfg, state) -> Router:
             await message.answer(_session_text(existing, "fa"),
                                  reply_markup=_session_kb("fa"))
             return
-        # profile policy: merge+compress runs the STANDARD compression flow;
-        # default edu480, custom target via /merge compress <mb>.
+        # profile policy: merge+compress runs the STANDARD queue with the
+        # single EDU480 profile (a legacy "<mb>" argument is accepted and
+        # ignored - target-size encoding is no longer an active path).
         profile = "edu480"
         target_mb = None
         if compress:
@@ -208,7 +210,6 @@ def build_router(engine, db, cfg, state) -> Router:
         except merge_mod.MergeError:
             await _edit(status, message, tr("mrg_session_closed", "fa"))
             return
-        from pathlib import Path
         staged = Path(stage_dir) / f"{seq:03d}-{media_mod.sanitize_filename(name, 50)}"
         staged.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -228,6 +229,7 @@ def build_router(engine, db, cfg, state) -> Router:
             sess["id"])
         # UX (spec §11.3/§11.4): the active-session banner + the REAL order
         # (from merge_items.seq) on every accepted upload.
+        lang = await engine._lang(message.from_user.id)
         items = await merge_mod.list_items(db, sess["id"])
         order_lines = " → ".join(
             f"{it['seq']}. {(it['filename'] or '?')[:24]}" for it in items[:8])

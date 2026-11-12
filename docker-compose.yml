@@ -152,6 +152,10 @@ services:
       - "--verbosity=1"
     volumes:
       - botapi_data:/var/lib/telegram-bot-api
+      # Read-only view of encoded outputs: lets the bot upload results with
+      # file:// (BOTAPI_READS_MEDIA=true) instead of streaming multi-GB
+      # multipart bodies into this server's temp dir.
+      - ${MEDIA_HOST_DIR}:/media:ro
     networks: [internal]
     # 31MB idle; tdlib buffers large (up to 2000MB) transfers — raise to 2G
     # if this container is ever OOMKilled.

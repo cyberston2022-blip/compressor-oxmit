@@ -17,7 +17,7 @@ Telegram users
           → encore-worker pool (bounded replicas, FFmpeg)
       → shared /media volume (incoming + output, no S3 needed)
   → private archive channel (canonical storage)
-  → delivery: forward → copy → file_id chain
+  → delivery: copy (no forward attribution) → file_id → upload chain
 ```
 
 Components:
@@ -81,14 +81,16 @@ See `docs/operations.md` for the full runbook, `docs/backup-restore.md`,
 
 ## Bot commands
 
-User: `/start` — that is all. Users send a video, get an info card
-(name, size, duration, resolution), press **🎬 فشرده‌سازی** and send a number
-**1–20** (compression level). The level maps to x264 CRF 18–28: the encoder is
-content-adaptive, so the achieved size reduction depends on the video (level
-20 ≈ up to ~60% smaller on typical content) while the CRF ceiling keeps the
-result watchable — visibly compressed, never mushy. Progress card includes a
-cancel button. If the encode yields no real size benefit (already-compressed
-source), the original is delivered with an explanation (no-gain policy).
+User: send a video → type the output file name (Persian or English, no
+extension; delivered as `<name>.mp4`) → the job enters the persistent queue
+**without being downloaded**. The status card shows queue position, jobs
+ahead, active workers and an ETA range from measured throughput, then the
+real stages (download → analysis → duplicate check → EDU480 encode →
+validation → upload). Every video is compressed with the single **EDU480**
+profile (short side 480 Lanczos, no upscale, ≤30 fps, x264 CRF 25 veryfast,
+AAC 64k); already-compliant sources are remuxed instead of re-encoded.
+`📨 ارتباط با مدیریت` (or `/contact`) sends one message to the **owner only**.
+See `reports/architecture-v3/README.md` for the full lifecycle.
 
 Admin: `/admin` (button panel: stats, health, pause, queue, errors, cleanup,
 ban, broadcast, user management, tier limits, global thumbnail, live monitor),
@@ -137,11 +139,14 @@ and ban status.
 - **Tiers** (editable in `/admin`): normal = 4GB / 2h / 5GB daily quota /
   2 active / 10 per hour; VIP = 4GB / 6h / 20GB daily / 4 active / 30 per hour
   (seed values, per-user overrides supported)
-- 50 queued jobs globally; disk guards: reject below 40GB free, auto-pause
-  below 20GB
+- 5000 queued jobs globally (job records — queued videos use no disk);
+  per-user `max_pending` (10 normal / 30 VIP); disk is checked when a worker
+  claims a job, the queue waits instead of rejecting
 
 ## Duplicate detection
 
+0. **Early (no download)** — Telegram `file_unique_id` of a known source or of
+   one of the bot's own EDU480 outputs → deliver the archived result
 1. **Exact** — SHA-256 of source + profile + version → reuse archived result
 2. **Fuzzy** — (size + normalized filename + duration ±2s) match for level and
    custom (percent) requests → deliver the previous compressed result of the

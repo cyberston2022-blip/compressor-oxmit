@@ -76,7 +76,9 @@ class Settings:
     max_source_bytes: int = 4 * 1024**3
     max_active_per_user: int = 2
     max_jobs_per_hour: int = 10
-    max_queued: int = 50
+    # Accepted (persistent) job records waiting for a worker. Queue capacity
+    # is metadata only - nothing is downloaded until a worker claims a job.
+    max_queued: int = 5000
     disk_min_free_bytes: int = 40 * 1024**3
     disk_pause_free_bytes: int = 20 * 1024**3
     admission_floor_bytes: int = 5 * 1024**3
@@ -137,6 +139,39 @@ class Settings:
     panel_public_url: str = ""
     owner_claim: bool = True
 
+    # ---- JIT queue / dispatcher ----
+    # Concurrent encode slots (defaults to WORKER_REPLICAS). A slot is held
+    # from claim (download) until the encode finishes; upload/delivery run
+    # outside the slot so the encoder never idles while Telegram uploads.
+    encode_slots: int = 0
+    # Extra jobs that may be claimed (downloaded) ahead of a free encoder to
+    # overlap download with encoding. 0 = strict just-in-time download.
+    prefetch_jobs: int = 0
+    lease_minutes: int = 20
+    upload_retries: int = 5
+    # Delete the Local Bot API copy of a source once no active job needs it.
+    delete_botapi_source: bool = True
+    # The telegram-bot-api container mounts /media read-only: outputs are
+    # uploaded with file:// (no multipart copy through the HTTP socket).
+    botapi_reads_media: bool = False
+    # Private moderation/activity channel; empty = the archive channel.
+    log_channel_id: int | None = None
+    naming_timeout_min: int = 30
+    support_session_min: int = 10
+
+    # ---- EDU480 (the single active compression profile) ----
+    edu480_crf: int = 25
+    edu480_preset: str = "veryfast"
+    edu480_max_fps: float = 30.0
+    edu480_audio_kbps: int = 64
+    # Sources already <=480p, H.264 + AAC, <= this video bitrate and <= the
+    # fps cap are compliant: they are remuxed (stream copy), not re-encoded.
+    edu480_compliant_kbps: int = 700
+
+    @property
+    def slots(self) -> int:
+        return max(1, self.encode_slots or self.worker_replicas)
+
     def tier_defaults(self) -> dict:
         """Initial per-tier limits (env-overridable); the admin panel edits
         the persisted copy in app_config afterwards."""
@@ -145,14 +180,16 @@ class Settings:
                 "max_source_gb": _int("NORMAL_MAX_SOURCE_GB", _int("MAX_SOURCE_GB", 4)),
                 "max_duration_min": _int("NORMAL_MAX_DURATION_MIN", 360),
                 "daily_quota_gb": _int("NORMAL_DAILY_QUOTA_GB", 5),
-                "max_active": _int("MAX_ACTIVE_PER_USER", 2),
+                "max_active": _int("MAX_ACTIVE_PER_USER", 1),
+                "max_pending": _int("MAX_PENDING_PER_USER", 10),
                 "max_per_hour": _int("MAX_JOBS_PER_HOUR_PER_USER", 10),
             },
             "vip": {
                 "max_source_gb": _int("VIP_MAX_SOURCE_GB", 4),
                 "max_duration_min": _int("VIP_MAX_DURATION_MIN", 720),
                 "daily_quota_gb": _int("VIP_DAILY_QUOTA_GB", 20),
-                "max_active": _int("VIP_MAX_ACTIVE_PER_USER", 4),
+                "max_active": _int("VIP_MAX_ACTIVE_PER_USER", 2),
+                "max_pending": _int("VIP_MAX_PENDING_PER_USER", 30),
                 "max_per_hour": _int("VIP_MAX_JOBS_PER_HOUR_PER_USER", 30),
             },
         }
@@ -237,6 +274,19 @@ class Settings:
             errs.append(f"FFMPEG_THREADS_MULTI={self.ffmpeg_threads_multi} outside 1..32")
         if self.custom_encoding_mode not in ("adaptive", "one_pass", "two_pass"):
             errs.append(f"CUSTOM_ENCODING_MODE={self.custom_encoding_mode} must be adaptive, one_pass, or two_pass")
+        if not 0 <= self.prefetch_jobs <= 8:
+            errs.append(f"PREFETCH_JOBS={self.prefetch_jobs} outside 0..8")
+        if not 0 <= self.encode_slots <= 32:
+            errs.append(f"ENCODE_SLOTS={self.encode_slots} outside 0..32")
+        if not 18 <= self.edu480_crf <= 35:
+            errs.append(f"EDU480_CRF={self.edu480_crf} outside 18..35")
+        if self.edu480_preset not in ("ultrafast", "superfast", "veryfast", "faster",
+                                      "fast", "medium"):
+            errs.append(f"EDU480_PRESET={self.edu480_preset} is not an x264 preset")
+        if not 10 <= self.edu480_max_fps <= 60:
+            errs.append(f"EDU480_MAX_FPS={self.edu480_max_fps} outside 10..60")
+        if self.lease_minutes < 5:
+            errs.append(f"LEASE_MINUTES={self.lease_minutes} must be >= 5")
         return errs
 
     @property
@@ -292,7 +342,7 @@ def load_settings() -> Settings:
     s.max_source_bytes = _int("MAX_SOURCE_GB", 4) * 1024**3
     s.max_active_per_user = _int("MAX_ACTIVE_PER_USER", 2)
     s.max_jobs_per_hour = _int("MAX_JOBS_PER_HOUR_PER_USER", 10)
-    s.max_queued = _int("MAX_QUEUED_JOBS", 50)
+    s.max_queued = _int("MAX_QUEUED_JOBS", 5000)
     s.disk_min_free_bytes = _int("DISK_MIN_FREE_GB", 40) * 1024**3
     s.disk_pause_free_bytes = _int("DISK_PAUSE_FREE_GB", 20) * 1024**3
     s.admission_floor_bytes = _int("ADMISSION_FLOOR_GB", 5) * 1024**3
@@ -354,6 +404,26 @@ def load_settings() -> Settings:
     s.owner_telegram_id = _int("OWNER_TELEGRAM_ID", 0)
     s.panel_public_url = os.getenv("PANEL_PUBLIC_URL", "").strip().rstrip("/")
     s.owner_claim = _bool("OWNER_CLAIM", True)
+
+    s.encode_slots = _int("ENCODE_SLOTS", 0)
+    s.prefetch_jobs = _int("PREFETCH_JOBS", 0)
+    s.lease_minutes = _int("LEASE_MINUTES", 20)
+    s.upload_retries = _int("UPLOAD_RETRIES", 5)
+    s.delete_botapi_source = _bool("DELETE_BOTAPI_SOURCE", True)
+    s.botapi_reads_media = _bool("BOTAPI_READS_MEDIA", False)
+    lc = os.getenv("LOG_CHANNEL_ID", "").strip()
+    if lc:
+        try:
+            s.log_channel_id = int(lc)
+        except ValueError:
+            _PARSE_ERRORS.append(f"LOG_CHANNEL_ID: expected integer, got {lc!r}")
+    s.naming_timeout_min = _int("NAMING_TIMEOUT_MIN", 30)
+    s.support_session_min = _int("SUPPORT_SESSION_MIN", 10)
+    s.edu480_crf = _int("EDU480_CRF", 25)
+    s.edu480_preset = os.getenv("EDU480_PRESET", "veryfast").strip().lower()
+    s.edu480_max_fps = _float("EDU480_MAX_FPS", 30.0)
+    s.edu480_audio_kbps = _int("EDU480_AUDIO_KBPS", 64)
+    s.edu480_compliant_kbps = _int("EDU480_COMPLIANT_KBPS", 700)
 
     errs = s.validate()
     if os.getenv("OXMIT_SKIP_VALIDATION", "") != "1" and errs:

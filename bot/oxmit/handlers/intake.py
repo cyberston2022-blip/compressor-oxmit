@@ -1,14 +1,26 @@
-"""Media intake: info card, percent-based compression, admin profile tools.
+"""Media intake: video -> output filename -> persistent queue (no download).
 
-User flow: video -> info card with a single compress button -> user sends a
-number 1..20 (size reduction percent) -> job runs on the `custom` profile with
-a computed target bitrate. Admins additionally get the full profile grid.
+Flow (spec "file renaming at the beginning of the workflow"):
+1. The user sends a video. Only Telegram metadata is inspected (size,
+   duration, dimensions, mime); NOTHING is downloaded.
+2. A persistent draft row is created and the bot asks for the output file
+   name (Persian or English, no extension).
+3. The answer is normalized (edu480.normalize_output_name) and the job is
+   registered in the queue with that name; the prompt message becomes the
+   live queue/progress card.
+
+Draft matching is deterministic: each user has at most ONE active filename
+prompt (DB partial unique index). Further videos wait behind it and are
+prompted one after another, so a name can never land on the wrong video.
+A reply to a specific prompt targets that draft explicitly. Drafts expire
+after NAMING_TIMEOUT_MIN and survive restarts (they live in PostgreSQL).
+
+The only compression profile is EDU480 - there is no profile picker.
 """
 from __future__ import annotations
 
 import time
 import uuid as uuid_mod
-from dataclasses import dataclass, field
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
@@ -19,30 +31,21 @@ from aiogram.types import (
     Message,
 )
 
+from .. import edu480
 from .. import forcesub
 from .. import media as media_mod
-from .. import permissions as perms
-from .. import quality as quality_mod
-from ..decision_engine import is_already_compressed, select_educational_resolution
-from ..dedup import find_cached_versions, find_fuzzy_source
 from ..engine import AdmissionError, _as_uuid
-from ..estimate import estimate_output_bytes
 from ..log import get_logger
 from ..media import human_size
-from ..profiles import BY_KEY, PROFILES
 from ..texts import reject_text, tr
 from .common import ensure_user, is_admin
-from .nav import send_denial
 
 log = get_logger("oxmit.intake")
 
 VIDEO_DOCS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts", ".m2ts", ".flv",
               ".wmv", ".mpg", ".mpeg", ".m4v", ".3gp"}
 
-_PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
-
-# per-user callback throttle (UX-01/02): a 0.6s gap kills double-tap storms
-# that re-ran DB lookups / re-sent multi-GB files (Argons plugins/query.py).
+# per-user callback throttle (UX-01/02): a 0.6s gap kills double-tap storms.
 _last_cb: dict[int, float] = {}
 
 
@@ -58,882 +61,311 @@ def _throttled(callback: CallbackQuery) -> bool:
     return False
 
 
-@dataclass
-class PendingPick:
-    file_id: str
-    file_unique_id: str
-    size: int
-    filename: str | None
-    chat_id: int
-    tg_id: int
-    source_msg_id: int
-    duration: int | None = None
-    width: int | None = None
-    height: int | None = None
-    mime: str | None = None
-    created: float = field(default_factory=time.time)
+def _clock(seconds) -> str:
+    if not seconds:
+        return "?"
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def _parse_level(raw: str) -> int | None:
-    """Accept 15, ۱۵, «15 درصد»/«درجه 15»/15% -> int in 1..20, else None."""
-    text = (raw or "").strip().lower().translate(_PERSIAN_DIGITS)
-    for token in ("درصد", "درجه", "percent", "level", "%"):
-        text = text.replace(token, " ").strip()
-    try:
-        value = int(float(text))
-    except (TypeError, ValueError, OverflowError):
-        # OverflowError: "1e400" parses as inf; int(inf) is not a ValueError.
+def extract_media(message: Message) -> dict | None:
+    """Telegram metadata of a video / video document, or None."""
+    video = message.video
+    document = message.document
+    if document is not None:
+        name = document.file_name or "file"
+        mime = (document.mime_type or "").lower()
+        suffix = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+        if not mime.startswith("video/") and suffix not in VIDEO_DOCS:
+            return None
+        return {"file_id": document.file_id, "file_unique_id": document.file_unique_id,
+                "size": document.file_size or 0, "filename": name, "mime": mime or suffix,
+                "duration": None, "width": None, "height": None}
+    if video is None:
         return None
-    return value if 1 <= value <= 20 else None
+    return {"file_id": video.file_id, "file_unique_id": video.file_unique_id,
+            "size": video.file_size or 0, "filename": video.file_name or "video.mp4",
+            "mime": video.mime_type or "", "duration": video.duration,
+            "width": video.width, "height": video.height}
 
 
 def build_router(engine, db, cfg, state) -> Router:
     router = Router(name="intake")
-    video_pending: dict[int, PendingPick] = {}    # tg_id -> pick, compress button shown
-    percent_pending: dict[int, PendingPick] = {}  # tg_id -> pick, waiting for a number
-    pending: dict[str, PendingPick] = {}          # admin profile-grid keys
-    pending_custom: dict[int, tuple[PendingPick, float]] = {}  # admin target size
-    # cache-offer flow (CACHE-01): offer key -> {pick, offer, created}
-    pending_offers: dict[str, dict] = {}
-
-    def _kb_profile_grid(prefix: str, key_id: str, lang: str) -> InlineKeyboardMarkup:
-        rows = []
-        row = []
-        for p in PROFILES:
-            if p.key == "custom":
-                continue
-            row.append(InlineKeyboardButton(text=p.title_fa, callback_data=f"{prefix}:{key_id}:{p.key}"))
-            if len(row) == 2:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        rows.append([
-            InlineKeyboardButton(text=tr("btn_custom_size", lang),
-                                 callback_data=f"{prefix}:{key_id}:custom"),
-        ])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-
-    def _cancel_kb(job_id: str, lang: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text=tr("btn_cancel_job", lang),
-                                 callback_data=f"canc:{job_id}"),
-        ]])
-
-    def _offer_text(offer: dict, lang: str) -> str:
-        """Cache-offer card: DETECTED values from the stored output's probe.
-
-        Anything the output asset does not know is shown as unavailable -
-        nothing is estimated or invented (spec section 6).
-        """
-        best = offer["best"]
-        short = quality_mod.version_short_side(best.get("out_w"), best.get("out_h"))
-        if short and best.get("out_w") and best.get("out_h"):
-            res = f"{short}p ({best['out_w']}×{best['out_h']})"
-        else:
-            res = tr("info_unavailable", lang)
-        dur = best.get("out_duration")
-        dur_s = (time.strftime("%H:%M:%S", time.gmtime(dur))
-                 if dur else tr("info_unavailable", lang))
-        vc = (best.get("out_vcodec") or tr("info_unavailable", lang)).upper()
-        ac = (best.get("out_acodec") or tr("info_unavailable", lang)).upper()
-        prof = BY_KEY.get(best["profile"])
-        if prof:
-            ptitle = prof.title_fa if lang != "en" else prof.title
-        else:
-            ptitle = best["profile"]
-        lines = [
-            tr("cache_offer_title", lang),
-            "",
-            tr("cache_quality", lang, res=res),
-            tr("cache_duration", lang, dur=dur_s),
-            tr("cache_size", lang, size=human_size(best.get("out_size"))),
-            tr("cache_vcodec", lang, codec=vc),
-            tr("cache_acodec", lang, codec=ac),
-            tr("cache_profile", lang, profile=ptitle),
-        ]
-        extra = len(offer["versions"]) - 1
-        if extra > 0:
-            lines.append("")
-            lines.append(tr("cache_versions_more", lang, n=extra))
-        lines.append("")
-        lines.append(tr("cache_offer_question", lang))
-        return "\n".join(lines)
-
-    def _kb_restricted(key_id: str, profile_keys: list[str],
-                       lang: str) -> InlineKeyboardMarkup | None:
-        """Grid limited to the given (quality-restricted) profile keys."""
-        rows, row = [], []
-        for key in profile_keys:
-            prof = BY_KEY.get(key)
-            if prof is None or key == "custom":
-                continue
-            row.append(InlineKeyboardButton(
-                text=prof.title_fa if lang != "en" else prof.title,
-                callback_data=f"cq:{key_id}:{key}"))
-            if len(row) == 2:
-                rows.append(row)
-                row = []
-        if row:
-            rows.append(row)
-        if not rows:
-            return None
-        rows.append([InlineKeyboardButton(text=tr("btn_cancel_job", lang),
-                                          callback_data="cmp:stop")])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-
-    def _offer_kb(key: str, lang: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=tr("btn_use_cached", lang),
-                                  callback_data=f"reuse:{key}")],
-            [InlineKeyboardButton(text=tr("btn_other_profile", lang),
-                                  callback_data=f"cprof:{key}")],
-            [InlineKeyboardButton(text=tr("btn_cancel_job", lang),
-                                  callback_data="cmp:stop")],
-        ])
 
     def _reject(code: str, lang: str, **fmt) -> str:
         return reject_text(code, lang, **fmt)
 
-    async def submit_now(pick: PendingPick, profile_key: str,
-                         target_mb: int | None = None, level: int | None = None,
-                         allow_reuse: bool = True) -> None:
-        user = await db.fetchrow("SELECT language FROM users WHERE tg_id = $1", pick.tg_id)
-        lang = (user["language"] if user else None) or "fa"
-        status = None
+    def _name_kb(draft_id, lang: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=tr("btn_keep_name", lang),
+                                  callback_data=f"nm:keep:{draft_id}")],
+            [InlineKeyboardButton(text=tr("btn_cancel_video", lang),
+                                  callback_data=f"nm:cancel:{draft_id}")],
+        ])
+
+    # ------------------------------------------------------------------
+    # drafts
+    # ------------------------------------------------------------------
+    async def _prompt_draft(draft) -> None:
+        """Make `draft` the user's single active naming prompt."""
+        lang = await engine._lang(draft["tg_id"])
+        ok = await db.fetchval(
+            "UPDATE intake_drafts SET status = 'awaiting_name', updated_at = now() "
+            "WHERE id = $1 AND status = 'waiting' "
+            "AND NOT EXISTS (SELECT 1 FROM intake_drafts d WHERE d.tg_id = $2 "
+            "                AND d.status = 'awaiting_name') RETURNING id",
+            draft["id"], draft["tg_id"])
+        if not ok:
+            return
+        text = tr("name_prompt", lang, src=(draft["filename"] or "?")[:60],
+                  size=human_size(draft["size_bytes"]), dur=_clock(draft["duration_s"]))
         try:
-            status = await engine.bot.send_message(pick.chat_id, "⏳ …")
+            msg = await engine.bot.send_message(
+                draft["chat_id"], text, reply_markup=_name_kb(draft["id"], lang),
+                reply_to_message_id=draft["source_message_id"])
         except TelegramAPIError:
-            pass
+            try:
+                msg = await engine.bot.send_message(
+                    draft["chat_id"], text, reply_markup=_name_kb(draft["id"], lang))
+            except TelegramAPIError:
+                return
+        await db.execute(
+            "UPDATE intake_drafts SET prompt_message_id = $2 WHERE id = $1",
+            draft["id"], msg.message_id)
+
+    async def _promote_next(tg_id: int) -> None:
+        nxt = await db.fetchrow(
+            "SELECT * FROM intake_drafts WHERE tg_id = $1 AND status = 'waiting' "
+            "ORDER BY created_at LIMIT 1", tg_id)
+        if nxt is not None:
+            await _prompt_draft(nxt)
+
+    async def _submit_draft(draft, raw_name: str | None, lang: str) -> None:
+        """Atomically consume the draft and register the job (still no download)."""
+        stem = edu480.normalize_output_name(raw_name) if raw_name is not None else \
+            edu480.normalize_output_name(draft["filename"])
+        if stem is None:
+            stem = "video"
+        taken = await db.fetchval(
+            "UPDATE intake_drafts SET status = 'submitted', updated_at = now() "
+            "WHERE id = $1 AND status IN ('awaiting_name', 'waiting') RETURNING id",
+            draft["id"])
+        if not taken:
+            return  # double tap / duplicate update: already handled
+        chat_id = draft["chat_id"]
+        status_id = draft["prompt_message_id"]
+        out_name = stem + ".mp4"
+        if status_id:
+            await engine.edit_status_sync(
+                chat_id, status_id, tr("name_accepted", lang, name=out_name) + "\n⏳ …")
+        else:
+            try:
+                m = await engine.bot.send_message(chat_id, tr("name_accepted", lang, name=out_name))
+                status_id = m.message_id
+            except TelegramAPIError:
+                status_id = None
         try:
-            result = await engine.handle_submission(
-                tg_id=pick.tg_id,
-                chat_id=pick.chat_id,
-                source_msg_id=pick.source_msg_id,
-                status_msg_id=status.message_id if status else None,
-                size_bytes=pick.size,
-                filename=pick.filename,
-                profile_key=profile_key,
-                file_id=pick.file_id,
-                file_unique_id=pick.file_unique_id,
-                target_mb=target_mb,
-                compress_level=level,
-                allow_reuse=allow_reuse,
-            )
+            result = await engine.register_job(
+                tg_id=draft["tg_id"], chat_id=chat_id,
+                source_msg_id=draft["source_message_id"], status_msg_id=status_id,
+                file_id=draft["file_id"], file_unique_id=draft["file_unique_id"],
+                size_bytes=int(draft["size_bytes"] or 0), filename=draft["filename"],
+                mime=draft["mime"], duration_s=draft["duration_s"],
+                width=draft["width"], height=draft["height"], output_name=stem)
         except AdmissionError as exc:
-            text = _reject(exc.code, lang, **exc.fmt)
-            if status:
-                await engine.edit_status_sync(pick.chat_id, status.message_id, text)
-            else:
-                try:
-                    await engine.bot.send_message(pick.chat_id, text)
-                except TelegramAPIError:
-                    pass
+            await db.execute("UPDATE intake_drafts SET status = 'cancelled' WHERE id = $1",
+                             draft["id"])
+            await engine.edit_status_sync(chat_id, status_id, _reject(exc.code, lang, **exc.fmt))
+            await _promote_next(draft["tg_id"])
             return
         except Exception:  # noqa: BLE001 - never leave the user in silence
-            log.exception("submission crashed", extra={"user_id": pick.tg_id,
-                                                       "profile": profile_key})
-            text = tr("submit_error", lang)
-            if status:
-                await engine.edit_status_sync(pick.chat_id, status.message_id, text)
-            else:
-                try:
-                    await engine.bot.send_message(pick.chat_id, text)
-                except TelegramAPIError:
-                    pass
+            log.exception("registration crashed", extra={"user_id": draft["tg_id"]})
+            await db.execute("UPDATE intake_drafts SET status = 'cancelled' WHERE id = $1",
+                             draft["id"])
+            await engine.edit_status_sync(chat_id, status_id, tr("submit_error", lang))
+            await _promote_next(draft["tg_id"])
             return
-        outcome = result["outcome"]
-        if outcome == "offer" and status:
-            # CACHE-01: explicit choice - reuse, lower profile, or cancel.
-            key = uuid_mod.uuid4().hex[:10]
-            pending_offers[key] = {"pick": pick, "offer": result,
-                                   "created": time.time()}
-            if len(pending_offers) > 5000:
-                oldest = sorted(pending_offers, key=lambda k: pending_offers[k]["created"])
-                for k in oldest[:1000]:
-                    pending_offers.pop(k, None)
+        job_id = result.get("job_id")
+        if job_id:
+            await db.execute("UPDATE intake_drafts SET job_id = $2 WHERE id = $1",
+                             draft["id"], _as_uuid(job_id))
+        outcome = result.get("outcome")
+        if outcome == "queued" and status_id:
+            text = engine.queue_card_text(
+                lang, name=out_name, size=int(draft["size_bytes"] or 0),
+                dur=draft["duration_s"], job_id=job_id, info=result)
             try:
                 await engine.bot.edit_message_text(
-                    chat_id=pick.chat_id, message_id=status.message_id,
-                    text=_offer_text(result, lang),
-                    reply_markup=_offer_kb(key, lang),
-                )
+                    chat_id=chat_id, message_id=status_id, text=text,
+                    reply_markup=engine._job_kb(job_id, lang))
             except TelegramAPIError:
                 pass
-            return
-        queue_note = ""
-        if outcome == "queued" and result.get("job_id"):
+        elif outcome == "joined" and status_id:
+            await engine.edit_status_sync(chat_id, status_id, tr("status_joined", lang))
+        elif outcome == "reused" and result.get("kind") == "known_output":
             try:
-                pos = await db.fetchval(
-                    """
-                    SELECT count(*) FROM jobs
-                    WHERE status IN ('queued','deferred')
-                      AND (priority > (SELECT priority FROM jobs WHERE id = $1::uuid)
-                           OR (priority = (SELECT priority FROM jobs WHERE id = $1::uuid)
-                               AND enqueued_at < (SELECT enqueued_at FROM jobs
-                                                  WHERE id = $1::uuid)))
-                    """,
-                    _as_uuid(result["job_id"]),
-                )
-                if pos:
-                    queue_note = "\n📍 " + tr("queue_position", lang, n=pos)
-            except Exception:  # noqa: BLE001 - informational only
-                queue_note = ""
-        if outcome == "joined" and status:
-            await engine.edit_status_sync(pick.chat_id, status.message_id,
-                                          tr("status_joined", lang))
-        elif outcome == "reused" and status:
-            await engine.edit_status_sync(pick.chat_id, status.message_id,
-                                          tr("status_reused", lang))
-        elif outcome == "queued" and status and level is not None:
-            estimate = result.get("estimate") or ""
-            text = tr("level_accepted", lang, level=level)
-            if estimate:
-                text += "\n" + estimate
-            text += queue_note
-            try:
-                await engine.bot.edit_message_text(
-                    chat_id=pick.chat_id, message_id=status.message_id,
-                    text=text,
-                    reply_markup=_cancel_kb(result["job_id"], lang),
-                )
+                await engine.bot.send_message(chat_id, tr("known_output", lang))
             except TelegramAPIError:
                 pass
-        elif outcome == "deferred" and status:
-            note = ""
-            if result.get("estimate"):
-                note = "\n" + result["estimate"] + "\n"
-            await engine.edit_status_sync(pick.chat_id, status.message_id,
-                                          tr("status_deferred", lang) + note)
-        elif outcome == "queued" and status:
-            # non-custom profiles (admins)
-            estimate = result.get("estimate") or ""
-            try:
-                await engine.bot.edit_message_text(
-                    chat_id=pick.chat_id, message_id=status.message_id,
-                    text=tr("status_queued_hint", lang)
-                         + (("\n" + estimate) if estimate else "") + queue_note,
-                    reply_markup=_cancel_kb(result["job_id"], lang),
-                )
-            except TelegramAPIError:
-                pass
+        await _promote_next(draft["tg_id"])
 
-    def _register_pending(pick: PendingPick) -> str:
-        key = uuid_mod.uuid4().hex[:10]
-        pending[key] = pick
-        return key
-
-    def _extract_media(message: Message) -> PendingPick | None:
-        video = message.video
-        document = message.document
-        if document is not None:
-            name = document.file_name or "file"
-            mime = (document.mime_type or "").lower()
-            suffix = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
-            if not mime.startswith("video/") and suffix not in VIDEO_DOCS:
-                return None
-            return PendingPick(
-                file_id=document.file_id, file_unique_id=document.file_unique_id,
-                size=document.file_size or 0, filename=name,
-                chat_id=message.chat.id, tg_id=message.from_user.id,
-                source_msg_id=message.message_id, mime=mime or suffix,
-            )
-        if video is None:
-            return None
-        return PendingPick(
-            file_id=video.file_id, file_unique_id=video.file_unique_id,
-            size=video.file_size or 0, filename=video.file_name or "video.mp4",
-            chat_id=message.chat.id, tg_id=message.from_user.id,
-            source_msg_id=message.message_id,
-            duration=video.duration, width=video.width, height=video.height,
-            mime=(video.mime_type or ""),
-        )
-
+    # ------------------------------------------------------------------
+    # video received
+    # ------------------------------------------------------------------
     @router.message(F.video | F.document)
     async def on_media(message: Message):
         if message.from_user is None:
             return
         user = await ensure_user(db, message.from_user)
-        if user["is_blocked"]:
-            return
         lang = user["language"] or "fa"
-        pick = _extract_media(message)
+        if user["is_blocked"]:
+            await message.answer(_reject("blocked_user", lang))
+            return
+        pick = extract_media(message)
         if pick is None:
             return
-
         admin_user = await is_admin(db, cfg, message.from_user.id)
         if not state.archive_channel_id:
             await message.answer(
                 tr("archive_setup_admin", lang) if admin_user
-                else _reject("archive_not_configured", lang)
-            )
+                else _reject("archive_not_configured", lang))
             return
-
-        block = await forcesub.gate(engine, db, pick.tg_id, is_admin_user=admin_user)
+        block = await forcesub.gate(engine, db, message.from_user.id, is_admin_user=admin_user)
         if block is not None:
             await message.answer(tr("fsub_required", lang),
                                  reply_markup=forcesub.join_markup(block, lang))
             return
-
+        if state.paused:
+            await message.answer(_reject("paused", lang))
+            return
+        # Lightweight validation on Telegram metadata (no download).
         if not admin_user:
             limits = await engine.effective_limits(message.from_user.id)
-            if pick.size > limits["max_source_bytes"]:
-                await message.answer(_reject(
-                    "too_large_tier", lang,
-                    max_gb=limits["max_source_bytes"] // 1024**3))
+            if pick["size"] > limits["max_source_bytes"]:
+                await message.answer(_reject("too_large_tier", lang,
+                                             max_gb=limits["max_source_bytes"] // 1024**3))
                 return
             max_dur = limits["max_duration_s"]
-            if max_dur and pick.duration and pick.duration > max_dur:
+            if max_dur and pick["duration"] and pick["duration"] > max_dur:
                 hours = max_dur / 3600
                 await message.answer(_reject(
                     "too_long", lang,
                     max_h=f"{hours:.0f} ساعت" if hours >= 1 else f"{max_dur / 60:.0f} دقیقه"))
                 return
+        draft_id = await db.fetchval(
+            """
+            INSERT INTO intake_drafts(tg_id, chat_id, source_message_id, file_id,
+                file_unique_id, size_bytes, filename, mime, duration_s, width, height)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            ON CONFLICT (chat_id, source_message_id) DO NOTHING RETURNING id
+            """,
+            message.from_user.id, message.chat.id, message.message_id, pick["file_id"],
+            pick["file_unique_id"], int(pick["size"] or 0), pick["filename"],
+            (pick["mime"] or "")[:64], pick["duration"], pick["width"], pick["height"])
+        if draft_id is None:
+            return  # duplicate Telegram update for the same message
+        draft = await db.fetchrow("SELECT * FROM intake_drafts WHERE id = $1", draft_id)
+        active = await db.fetchval(
+            "SELECT id FROM intake_drafts WHERE tg_id = $1 AND status = 'awaiting_name'",
+            message.from_user.id)
+        if active is not None:
+            await message.answer(tr("name_waiting_turn", lang,
+                                    src=(pick["filename"] or "?")[:60]))
+            return
+        await _prompt_draft(draft)
 
-        # --- info card (Telegram metadata only; nothing is invented) ---
-        dur = None
-        if pick.duration:
-            dur = time.strftime("%H:%M:%S", time.gmtime(pick.duration))
-        res = (f"{pick.width}×{pick.height}" if pick.width and pick.height
-               else tr("info_unavailable", lang))
-        kind = tr("info_kind_video", lang) if message.video else tr("info_kind_doc", lang)
-        card = tr(
-            "info_card", lang,
-            name=(pick.filename or "?")[:48],
-            size=human_size(pick.size),
-            limit_note="",
-            dur=dur or tr("info_unavailable", lang),
-            res=res,
-        ) + "\n" + tr("info_details", lang,
-                      codec=(pick.mime or tr("info_unavailable", lang))[:24],
-                      kind=kind)
+    # ------------------------------------------------------------------
+    # filename answer
+    # ------------------------------------------------------------------
+    async def _draft_for_text(message: Message):
+        """The draft this text answers, or None (then the text is ignored here)."""
+        if message.from_user is None or not message.text or message.text.startswith("/"):
+            return None
+        uid = message.from_user.id
+        reply = message.reply_to_message
+        if reply is not None:
+            d = await db.fetchrow(
+                "SELECT * FROM intake_drafts WHERE tg_id = $1 "
+                "AND status IN ('awaiting_name','waiting') "
+                "AND (prompt_message_id = $2 OR source_message_id = $2) "
+                "AND chat_id = $3",
+                uid, reply.message_id, message.chat.id)
+            if d is not None:
+                return d
+        return await db.fetchrow(
+            "SELECT * FROM intake_drafts WHERE tg_id = $1 AND status = 'awaiting_name' "
+            "AND chat_id = $2", uid, message.chat.id)
 
-        # --- Pre-analysis: Check if already compressed ---
-        probe_dict = {
-            "width": pick.width,
-            "height": pick.height,
-            "duration_s": pick.duration,
-            "bitrate": int(pick.size * 8 / pick.duration) if (pick.duration and pick.size) else 0,
-        }
-        already_comp, comp_reason = is_already_compressed(probe_dict, pick.size)
+    async def _awaiting_name(message: Message):
+        draft = await _draft_for_text(message)
+        return {"draft": draft} if draft is not None else False
 
-        if already_comp:
-            percent_pending.pop(pick.tg_id, None)
-            video_pending[pick.tg_id] = pick
-            # Combined decision card (UX spec §17): when a cached version of
-            # this source is discoverable (fuzzy identity match, BEFORE any
-            # hashing), merge the "already compressed" warning and the cache
-            # offer into ONE card. Without a cache hit, keep the single
-            # concise warning card (Rostam / remux).
-            warn_card = tr("already_compressed_warning", lang, reason=comp_reason)
-            fuzzy_sha = None
-            try:
-                name_norm = media_mod.sanitize_filename(
-                    pick.filename or "video").lower()
-                fuzzy_sha = await find_fuzzy_source(
-                    db, size_bytes=pick.size, name_norm=name_norm,
-                    duration_s=pick.duration or 0.0)
-            except Exception:  # noqa: BLE001 - pre-analysis is best-effort
-                fuzzy_sha = None
-            if fuzzy_sha:
+    @router.message(F.text, _awaiting_name)
+    async def on_name_text(message: Message, draft):
+        lang = await engine._lang(message.from_user.id)
+        stem = edu480.normalize_output_name(message.text)
+        if stem is None:
+            await message.answer(tr("name_invalid", lang))
+            return
+        await _submit_draft(draft, message.text, lang)
+
+    @router.callback_query(F.data.startswith("nm:"))
+    async def on_name_button(callback: CallbackQuery):
+        if _throttled(callback):
+            await callback.answer()
+            return
+        try:
+            _, action, draft_id = callback.data.split(":", 2)
+            did = uuid_mod.UUID(draft_id)
+        except ValueError:
+            await callback.answer()
+            return
+        draft = await db.fetchrow("SELECT * FROM intake_drafts WHERE id = $1", did)
+        lang = await engine._lang(callback.from_user.id)
+        if draft is None or draft["tg_id"] != callback.from_user.id:
+            await callback.answer(tr("admin_denied", lang), show_alert=True)
+            return
+        if draft["status"] not in ("awaiting_name", "waiting"):
+            await callback.answer(tr("cancel_expired", lang), show_alert=True)
+            return
+        await callback.answer()
+        if action == "keep":
+            await _submit_draft(draft, None, lang)
+        elif action == "cancel":
+            ok = await db.fetchval(
+                "UPDATE intake_drafts SET status = 'cancelled', updated_at = now() "
+                "WHERE id = $1 AND status IN ('awaiting_name','waiting') RETURNING id", did)
+            if ok and callback.message is not None:
                 try:
-                    versions = quality_mod.group_versions(
-                        await find_cached_versions(db, fuzzy_sha))
-                    best = quality_mod.pick_best_version(versions)
-                except Exception:  # noqa: BLE001
-                    best = None
-                if best is not None:
-                    key = uuid_mod.uuid4().hex[:10]
-                    pending_offers[key] = {
-                        "pick": pick, "created": time.time(),
-                        "offer": {
-                            "sha": fuzzy_sha, "reuse_kind": "fuzzy",
-                            "best": best, "versions": versions,
-                            "probe": {"width": pick.width,
-                                      "height": pick.height,
-                                      "duration_s": pick.duration},
-                        },
-                    }
-                    if len(pending_offers) > 5000:
-                        oldest = sorted(pending_offers,
-                                        key=lambda k: pending_offers[k]["created"])
-                        for k in oldest[:1000]:
-                            pending_offers.pop(k, None)
-                    offer_text = _offer_text({
-                        "best": best, "versions": versions,
-                    }, lang)
-                    kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(
-                            text=tr("btn_use_cached", lang),
-                            callback_data=f"reuse:{key}")],
-                        [InlineKeyboardButton(
-                            text=tr("btn_other_profile", lang),
-                            callback_data=f"cprof:{key}")],
-                        [InlineKeyboardButton(text=tr("btn_rostam", lang),
-                                              callback_data="cmp:rostam")],
-                        [InlineKeyboardButton(text=tr("btn_cancel_job", lang),
-                                              callback_data="cmp:stop")],
-                    ])
-                    await message.answer(
-                        f"{card}\n\n♻️ {tr('cache_offer_title', lang)}\n\n"
-                        f"{offer_text}\n\n⚠️ {tr('already_comp_short', lang)}",
-                        reply_markup=kb)
-                    return
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=tr("btn_rostam", lang), callback_data="cmp:rostam")],
-                [InlineKeyboardButton(text=tr("btn_send_original", lang), callback_data="cmp:remux")],
-                [InlineKeyboardButton(text=tr("btn_cancel_job", lang), callback_data="cmp:stop")],
-            ])
-            await message.answer(f"{card}\n\n{warn_card}", reply_markup=kb)
-            return
+                    await callback.message.edit_text(tr("draft_cancelled", lang))
+                except TelegramAPIError:
+                    pass
+            await _promote_next(draft["tg_id"])
 
-        # --- Dynamic predictions for Glass Panel ---
-        tw480, th480, _ = select_educational_resolution(pick.width or 1920, pick.height or 1080)
-        tw480, th480 = (tw480 or 854), (th480 or 480)
-        out_pix_480 = float(tw480 * th480)
-        dur = pick.duration or 60.0
-        low_480, high_480 = estimate_output_bytes(
-            dur, out_pix_480, "h264", 25, audio_kbps=64.0, source_bytes=pick.size
-        )
-        mid_480 = (low_480 + high_480) / 2 if high_480 > 0 else (pick.size * 0.3)
-        cut_480 = max(10, min(95, round((1.0 - mid_480 / pick.size) * 100))) if pick.size > 0 else 75
-        mb_480 = max(1, round(mid_480 / (1024 * 1024)))
-
-        tw360, th360 = (640, 360) if min(pick.width or 1920, pick.height or 1080) > 360 else (pick.width or 640, pick.height or 360)
-        out_pix_360 = float(tw360 * th360)
-        low_360, high_360 = estimate_output_bytes(
-            dur, out_pix_360, "h264", 26, audio_kbps=48.0, source_bytes=pick.size
-        )
-        mid_360 = (low_360 + high_360) / 2 if high_360 > 0 else (pick.size * 0.18)
-        cut_360 = max(15, min(97, round((1.0 - mid_360 / pick.size) * 100))) if pick.size > 0 else 85
-        mb_360 = max(1, round(mid_360 / (1024 * 1024)))
-
-        btn_480_text = tr("btn_edu480", lang, cut=cut_480, mb=mb_480)
-        btn_360_text = tr("btn_edu360", lang, cut=cut_360, mb=mb_360)
-        btn_cust_text = tr("btn_custom_target", lang)
-        btn_level_text = tr("btn_level", lang)
-
-        panel_kb = [
-            [InlineKeyboardButton(text=btn_480_text, callback_data="cmp:edu480")],
-            [InlineKeyboardButton(text=btn_360_text, callback_data="cmp:edu360")],
-            [InlineKeyboardButton(text=btn_cust_text, callback_data="cmp:cust_prompt")],
-            [InlineKeyboardButton(text=btn_level_text, callback_data="cmp:go")],
-        ]
-
-        if admin_user:
-            percent_pending.pop(pick.tg_id, None)
-            video_pending[pick.tg_id] = pick
-            key = _register_pending(pick)
-            # Owner-managed permission (spec 10): the admin profile grid is a
-            # compression.use feature; without it an admin sees the standard
-            # user panel. Backend re-check on the pk: callback as well.
-            if await perms.has_perm(engine, message.from_user.id, "compression.use"):
-                kb = _kb_profile_grid("pk", key, lang)
-                for row in reversed(panel_kb):
-                    kb.inline_keyboard.insert(0, row)
-                await message.answer(card + "\n\n" + tr("choose_profile_for", lang),
-                                     reply_markup=kb)
-            else:
-                await message.answer(
-                    card + "\n\n" + tr("choose_profile_for", lang),
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=panel_kb))
-            return
-
-        percent_pending.pop(pick.tg_id, None)
-        video_pending[pick.tg_id] = pick
-        await message.answer(
-            card + "\n\n" + tr("choose_profile_for", lang),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=panel_kb),
-        )
-
-    # ---- direct-profile buttons (edu/rostam/remux): one mapped handler ----
-    # These three handlers were byte-identical except the target profile;
-    # a dispatch table replaces the copy-paste trio (keeps exact behavior).
-    _CMP_PROFILE_BTNS = {
-        "cmp:edu480": "edu480",
-        "cmp:edu360": "edu360",
-        "cmp:rostam": "rostam",
-        "cmp:remux": "remux",
-    }
-
-    @router.callback_query(F.data.in_(set(_CMP_PROFILE_BTNS)))
-    async def on_compress_profile_btn(callback: CallbackQuery):
+    # ---- cancel button on the queue/progress card ----
+    @router.callback_query(F.data.startswith("canc:"))
+    async def on_cancel_btn(callback: CallbackQuery):
         if _throttled(callback):
             await callback.answer()
             return
-        pick = video_pending.get(callback.from_user.id)
-        lang = await engine._lang(callback.from_user.id)
-        if pick is None:
-            await callback.answer(tr("cancel_expired", lang), show_alert=True)
-            return
-        await callback.answer()
-        percent_pending.pop(callback.from_user.id, None)
+        job_id = callback.data.split(":", 1)[1]
         try:
-            await engine.bot.edit_message_reply_markup(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                reply_markup=None,
-            )
-        except TelegramAPIError:
-            pass
-        await submit_now(pick, _CMP_PROFILE_BTNS[callback.data])
-
-    # ---- custom size prompt handler (for all users) ----
-    @router.callback_query(F.data == "cmp:cust_prompt")
-    async def on_custom_prompt_btn(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        pick = video_pending.get(callback.from_user.id)
-        lang = await engine._lang(callback.from_user.id)
-        if pick is None:
-            await callback.answer(tr("cancel_expired", lang), show_alert=True)
-            return
-        await callback.answer()
-        pending_custom[callback.from_user.id] = (pick, time.time())
-        try:
-            await engine.bot.edit_message_reply_markup(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                reply_markup=None,
-            )
-        except TelegramAPIError:
-            pass
-
-        # Quick size choice buttons
-        src_mb = int(pick.size / (1024 * 1024)) if pick.size else 500
-        cands = [50, 100, 200, 400]
-        quick_mbs = [m for m in cands if m < src_mb]
-        if not quick_mbs:
-            quick_mbs = [max(10, src_mb // 2)]
-
-        kb_rows = []
-        quick_row = [
-            InlineKeyboardButton(text=f"{m} MB", callback_data=f"cset:{m}")
-            for m in quick_mbs
-        ]
-        if quick_row:
-            kb_rows.append(quick_row)
-        kb_rows.append([InlineKeyboardButton(text=tr("btn_cancel_job", lang), callback_data="cmp:stop")])
-
-        await callback.message.answer(
-            tr("custom_target_prompt", lang),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
-        )
-
-    # ---- quick custom size selection callback (cset:<mb>) ----
-    @router.callback_query(F.data.startswith("cset:"))
-    async def on_custom_quick_set(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        target_mb_str = callback.data.split(":", 1)[1]
-        try:
-            target_mb = int(target_mb_str)
+            row = await db.fetchrow("SELECT * FROM jobs WHERE id = $1", _as_uuid(job_id))
         except ValueError:
-            await callback.answer()
-            return
-        entry = pending_custom.pop(callback.from_user.id, None)
-        pick = entry[0] if entry else video_pending.get(callback.from_user.id)
-        lang = await engine._lang(callback.from_user.id)
-        if pick is None:
-            await callback.answer(tr("cancel_expired", lang), show_alert=True)
-            return
-        await callback.answer()
-        try:
-            await engine.bot.edit_message_reply_markup(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                reply_markup=None,
-            )
-        except TelegramAPIError:
-            pass
-        await submit_now(pick, "custom", target_mb=target_mb)
-
-    # ---- compress button -> ask for the compression level ----
-    @router.callback_query(F.data == "cmp:go")
-    async def on_compress_btn(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        if callback.message is None:
-            return
-        pick = video_pending.get(callback.from_user.id)
-        lang = await engine._lang(callback.from_user.id)
-        if pick is None:
-            await callback.answer(tr("cancel_expired", lang), show_alert=True)
-            return
-        await callback.answer()
-        percent_pending[callback.from_user.id] = pick
-        try:
-            await engine.bot.edit_message_reply_markup(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                reply_markup=None,
-            )
-        except TelegramAPIError:
-            pass
-        await callback.message.answer(
-            tr("level_prompt", lang),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=tr("btn_cancel", lang),
-                                     callback_data="cmp:stop"),
-            ]]),
-        )
-
-    # ---- cancel exit for the level / custom-size prompt (UX-05) ----
-    @router.callback_query(F.data == "cmp:stop")
-    async def on_compress_stop(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
+            row = None
+        if not row:
+            await callback.answer(tr("job_gone", "fa"), show_alert=True)
             return
         lang = await engine._lang(callback.from_user.id)
-        percent_pending.pop(callback.from_user.id, None)
-        pending_custom.pop(callback.from_user.id, None)
-        await callback.answer(tr("pending_cancelled", lang))
-        if callback.message is not None:
-            try:
-                await callback.message.delete()
-            except TelegramAPIError:
-                pass
-
-    # ---- cache-offer flow (CACHE-01): send existing / lower profile / cancel ----
-    def _offer_owner_ok(entry: dict, callback: CallbackQuery) -> bool:
-        pick = entry.get("pick")
-        return bool(pick and callback.from_user and pick.tg_id == callback.from_user.id)
-
-    def _fresh_grid_for(offer: dict, key: str, lang: str) -> InlineKeyboardMarkup | None:
-        """Feasible (no-upscale) grid when the cached version proved unusable.
-
-        No cache restriction here: the version we offered just failed to
-        deliver, so the user may pick any profile the real source supports.
-        """
-        probe = offer.get("probe") or {}
-        allowed = quality_mod.allowed_profiles_for_source(
-            [p.key for p in PROFILES], probe.get("width"), probe.get("height"))
-        return _kb_restricted(key, allowed, lang)
-
-    @router.callback_query(F.data.startswith("reuse:"))
-    async def on_use_cached(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        key = callback.data.split(":", 1)[1]
-        entry = pending_offers.pop(key, None)
-        lang = await engine._lang(callback.from_user.id)
-        if entry is None or callback.message is None:
-            await callback.answer(tr("cache_gone", lang), show_alert=True)
-            return
-        if not _offer_owner_ok(entry, callback):
-            pending_offers[key] = entry
-            await callback.answer(tr("admin_denied", lang), show_alert=True)
-            return
-        await callback.answer(tr("cache_delivering", lang))
-        try:
-            await engine.bot.edit_message_reply_markup(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                reply_markup=None,
-            )
-        except TelegramAPIError:
-            pass
-        offer = entry["offer"]
-        pick = entry["pick"]
-        best = offer["best"]
-        result = await engine.deliver_cached_offer(
-            sha=offer["sha"], profile_key=best["profile"],
-            profile_version=best.get("profile_version", 1),
-            reuse_kind=offer.get("reuse_kind", "exact"),
-            tg_id=pick.tg_id, chat_id=pick.chat_id,
-            status_msg_id=callback.message.message_id,
-            size_bytes=pick.size,
-        )
-        if result.get("outcome") == "cache_gone" or not result.get("delivered", True):
-            # Recover gracefully: the stored Telegram file is gone - mark it
-            # (done inside engine) and let the user start a fresh encode.
-            new_key = uuid_mod.uuid4().hex[:10]
-            pending_offers[new_key] = {**entry, "created": time.time()}
-            kb = _fresh_grid_for(offer, new_key, lang)
-            text = tr("cache_unavailable", lang)
-            if kb is None:
-                text += "\n" + tr("cache_none_available", lang)
-            try:
-                await engine.bot.send_message(
-                    pick.chat_id, text,
-                    reply_markup=kb,
-                )
-            except TelegramAPIError:
-                pass
-
-    @router.callback_query(F.data.startswith("cprof:"))
-    async def on_choose_other_profile(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        key = callback.data.split(":", 1)[1]
-        entry = pending_offers.get(key)
-        lang = await engine._lang(callback.from_user.id)
-        if entry is None or callback.message is None:
-            await callback.answer(tr("cache_gone", lang), show_alert=True)
-            return
-        if not _offer_owner_ok(entry, callback):
-            await callback.answer(tr("admin_denied", lang), show_alert=True)
-            return
-        offer = entry["offer"]
-        probe = offer.get("probe") or {}
-        cached_short = quality_mod.version_short_side(
-            offer["best"].get("out_w"), offer["best"].get("out_h"))
-        allowed = quality_mod.allowed_profiles(
-            [p.key for p in PROFILES], probe.get("width"), probe.get("height"),
-            cached_short)
-        kb = _kb_restricted(key, allowed, lang)
-        await callback.answer()
-        if kb is None:
-            await callback.answer(tr("cache_none_available", lang), show_alert=True)
-            return
-        try:
-            await engine.bot.edit_message_text(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                text=tr("restricted_grid_title", lang) + "\n\n"
-                     + tr("restricted_grid_note", lang),
-                reply_markup=kb,
-            )
-        except TelegramAPIError:
-            pass
-
-    @router.callback_query(F.data.startswith("cq:"))
-    async def on_restricted_pick(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        try:
-            _, key, profile_key = callback.data.split(":", 2)
-        except ValueError:
-            return
-        if profile_key not in BY_KEY:
-            return
-        entry = pending_offers.pop(key, None)
-        lang = await engine._lang(callback.from_user.id)
-        if entry is None or callback.message is None:
-            await callback.answer(tr("cache_gone", lang), show_alert=True)
-            return
-        if not _offer_owner_ok(entry, callback):
-            pending_offers[key] = entry
-            await callback.answer(tr("admin_denied", lang), show_alert=True)
-            return
-        await callback.answer()
-        try:
-            await engine.bot.edit_message_reply_markup(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                reply_markup=None,
-            )
-        except TelegramAPIError:
-            pass
-        # allow_reuse=False: the user explicitly declined the cached version,
-        # so never re-offer or silently reuse - encode fresh.
-        await submit_now(entry["pick"], profile_key, allow_reuse=False)
-
-    def _waiting_percent(message: Message) -> bool:
-        return message.from_user is not None and message.from_user.id in percent_pending
-
-    @router.message(F.text, _waiting_percent)
-    async def on_percent_text(message: Message):
-        pick = percent_pending.pop(message.from_user.id, None)
-        if pick is None:
-            return
-        lang_row = await db.fetchrow("SELECT language FROM users WHERE tg_id = $1",
-                                     message.from_user.id)
-        lang = lang_row["language"] or "fa"
-        level = _parse_level(message.text or "")
-        if level is None:
-            percent_pending[message.from_user.id] = pick
-            await message.answer(tr("level_invalid", lang))
-            return
-        await submit_now(pick, "level", level=level)
-
-    # ---- admin: profile picked from the grid ----
-    @router.callback_query(F.data.startswith("pk:"))
-    async def on_profile_pick(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        try:
-            _, key_id, profile_key = callback.data.split(":", 2)
-        except ValueError:
-            return
-        if profile_key not in BY_KEY:
-            return
-        pick = pending.pop(key_id, None)
-        if pick is None or callback.message is None:
-            await callback.answer(tr("cancel_expired", "fa"), show_alert=True)
-            return
-        # Ownership: in a group any member sees the admin's grid buttons;
-        # without this check a member could spend the admin's quota or
-        # hijack pending_custom with their own next numeric message.
-        if pick.tg_id != callback.from_user.id and not await is_admin(
+        if row["requester_tg_id"] != callback.from_user.id and not await is_admin(
             db, cfg, callback.from_user.id
         ):
-            await callback.answer(tr("admin_denied", "fa"), show_alert=True)
+            await callback.answer(tr("admin_denied", lang), show_alert=True)
             return
-        # Backend permission gate (spec 3.3): the grid being visible is not
-        # the authorization.
-        if not await perms.has_perm(engine, callback.from_user.id, "compression.use"):
-            await callback.answer(
-                tr("perm_denied", "fa", perm=perms.PERM_LABELS_FA["compression.use"]),
-                show_alert=True)
-            if callback.message is not None:
-                await send_denial(
-                    engine, db, callback.message.chat.id,
-                    callback.from_user.id, "compression.use")
-            return
-        lang = await engine._lang(callback.from_user.id)
-        try:
-            await engine.bot.edit_message_reply_markup(
-                chat_id=callback.message.chat.id,
-                message_id=callback.message.message_id,
-                reply_markup=None,
-            )
-        except TelegramAPIError:
-            pass
-        if profile_key == "custom":
-            pending_custom[pick.tg_id] = (pick, time.time())
-            await callback.message.answer(tr("custom_size_prompt", lang))
-            return
-        await submit_now(pick, profile_key)
-
-    # ---- admin: custom target size: next numeric message ----
-    def _has_custom_pending(message: Message) -> bool:
-        p = pending_custom.get(message.from_user.id)
-        return bool(p) and time.time() - p[1] < 600
-
-    @router.message(F.text, _has_custom_pending)
-    async def on_custom_size(message: Message):
-        pick, _ts = pending_custom.pop(message.from_user.id, None)
-        lang = await engine._lang(message.from_user.id)
-        raw = (message.text or "").strip().replace(",", "").lower().translate(_PERSIAN_DIGITS)
-        try:
-            if raw.endswith("gb") or raw.endswith("g"):
-                target_mb = int(float(raw.rstrip("gb").rstrip("g")) * 1024)
-            elif raw.endswith("mb") or raw.endswith("m"):
-                target_mb = int(float(raw.rstrip("mb").rstrip("m")))
-            else:
-                target_mb = int(float(raw))
-        except (ValueError, OverflowError):
-            # OverflowError: "inf"/"1e400" are valid floats but not ints.
-            await message.answer(_reject("bad_target", lang, detail=raw[:20]))
-            return
-        if not (cfg.target_min_mb <= target_mb <= cfg.target_max_gb * 1024):
-            await message.answer(_reject(
-                "bad_target", lang,
-                detail=f"{cfg.target_min_mb}MB..{cfg.target_max_gb}GB"))
-            return
-        if pick.size and target_mb * 1024 * 1024 >= pick.size:
-            await message.answer(_reject(
-                "bad_target", lang, detail=f"<= source {human_size(pick.size)}"))
-            return
-        await submit_now(pick, "custom", target_mb=target_mb)
+        await callback.answer(tr("cancelling", lang))
+        await engine.cancel_job(row, by_admin=row["requester_tg_id"] != callback.from_user.id)
 
     # ---- failure recovery buttons ----
     @router.callback_query(F.data.startswith("rtry:"))
@@ -973,27 +405,6 @@ def build_router(engine, db, cfg, state) -> Router:
         if not msg:
             msg = tr("err_details_none", lang)
         await callback.message.answer(f"ℹ️ [{cat}]\n{msg}")
-
-    # ---- cancel button on the progress card (UX-01: cheap checks first,
-    # then an instant ack, then the actual cancel) ----
-    @router.callback_query(F.data.startswith("canc:"))
-    async def on_cancel_btn(callback: CallbackQuery):
-        if _throttled(callback):
-            await callback.answer()
-            return
-        job_id = callback.data.split(":", 1)[1]
-        row = await db.fetchrow("SELECT * FROM jobs WHERE id = $1", _as_uuid(job_id))
-        if not row:
-            await callback.answer(tr("job_gone", "fa"), show_alert=True)
-            return
-        lang = await engine._lang(callback.from_user.id)
-        if row["requester_tg_id"] != callback.from_user.id and not await is_admin(
-            db, cfg, callback.from_user.id
-        ):
-            await callback.answer(tr("admin_denied", lang), show_alert=True)
-            return
-        await callback.answer(tr("cancelling", lang))
-        await engine.cancel_job(row)
 
     # ---- library-style redeliver button (job-based) ----
     @router.callback_query(F.data.startswith("rdl:"))
@@ -1122,19 +533,23 @@ def build_router(engine, db, cfg, state) -> Router:
                                    channel=chat.id, title=chat.title or "?"))
 
     async def sweep_pending() -> None:
-        cutoff = time.time() - 3600
-        for uid in [u for u, p in video_pending.items() if p.created < cutoff]:
-            video_pending.pop(uid, None)
-        for uid in [u for u, p in percent_pending.items() if p.created < cutoff]:
-            percent_pending.pop(uid, None)
-        for key in [k for k, v in pending.items() if v.created < cutoff]:
-            pending.pop(key, None)
+        # Expire unanswered naming prompts (persistent drafts) and move each
+        # user's next waiting video up.
+        mins = max(1, int(cfg.naming_timeout_min))
+        expired = await db.fetch(
+            "UPDATE intake_drafts SET status = 'expired', updated_at = now() "
+            "WHERE (status = 'awaiting_name' AND updated_at < now() - make_interval(mins => $1)) "
+            "   OR (status = 'waiting' AND created_at < now() - make_interval(mins => $1 * 4)) "
+            "RETURNING tg_id, chat_id, prompt_message_id", mins)
+        users = set()
+        for r in expired:
+            users.add(r["tg_id"])
+            if r["prompt_message_id"]:
+                await engine.edit_status_sync(r["chat_id"], r["prompt_message_id"],
+                                              tr("name_expired", await engine._lang(r["tg_id"])))
+        for uid in users:
+            await _promote_next(uid)
         now = time.time()
-        for uid in [u for u, (_, t) in pending_custom.items() if now - t > 600]:
-            pending_custom.pop(uid, None)
-        # cache offers: same one-hour window as the other pending states
-        for key in [k for k, v in pending_offers.items() if v["created"] < cutoff]:
-            pending_offers.pop(key, None)
         # archive proposals: 30-minute confirm window (SPEC-05)
         for uid in [u for u, (_k, _c, t) in pending_archive_chat.items()
                     if now - t > 1800]:

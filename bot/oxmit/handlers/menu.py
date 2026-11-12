@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import deque
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import forcesub
 from .. import webpanel
@@ -49,8 +49,13 @@ def build_router(engine, db, cfg, state) -> Router:
         if not state.archive_channel_id and admin_user:
             await message.answer(tr("archive_setup_admin", lang))
         await message.answer(
-            tr("welcome", lang, name=message.from_user.first_name or "",
+            tr("welcome2", lang, name=message.from_user.first_name or "",
                max_gb=cfg.max_source_bytes // 1024**3),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=tr("btn_contact", lang), callback_data="sup:open")],
+                [InlineKeyboardButton(text=tr("btn_myjobs", lang), callback_data="menu:jobs"),
+                 InlineKeyboardButton(text=tr("btn_menu", lang), callback_data="menu:home")],
+            ]),
         )
 
     @router.message(F.text.startswith("/panel"))

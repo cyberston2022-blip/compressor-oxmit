@@ -20,15 +20,15 @@ from aiogram.types import (BotCommand, BotCommandScopeChat, FSInputFile,
 
 from . import archive as archive_mod
 from . import audit as audit_mod
-from . import decision_engine, dedup, media as media_mod
+from . import dedup, edu480, media as media_mod
 from . import merge as merge_mod
 from . import quality as quality_mod
 from . import watermark as watermark_mod
 from .config import Settings
 from .encore_client import EncoreClient, EncoreError, EncoreNotFound
+from .jobqueue import POST_ENCODE_STAGES, QueueMixin
 from .log import get_logger
-from .profiles import (BY_KEY, compute_target_params, crf_for_level,
-                       preset_for_level, resolve_variant)
+from .profiles import compute_target_params
 from .texts import tr
 
 log = get_logger("oxmit.engine")
@@ -153,7 +153,7 @@ class Fingerprinter:
                 self.queue.task_done()
 
 
-class JobEngine:
+class JobEngine(QueueMixin):
     def __init__(self, db, cfg: Settings, bot, encre: EncoreClient) -> None:
         self.db = db
         self.cfg = cfg
@@ -170,6 +170,8 @@ class JobEngine:
         self._lang_cache: dict[int, str] = {}
         self._tiers_cache: tuple[dict, float] | None = None
         self._copy_state: dict[str, dict] = {}
+        self._completing: set[str] = set()
+        self._init_queue()
 
     async def _report_copy_progress(self, job_id: str) -> None:
         """Edit the requester status card with live byte-progress + MB/s while
@@ -262,6 +264,7 @@ class JobEngine:
             BotCommand(command="menu", description="🧭 منوی امکانات"),
             BotCommand(command="myjobs", description="📋 کارهای من"),
             BotCommand(command="settings", description="⚙️ تنظیمات"),
+            BotCommand(command="contact", description="📨 ارتباط با مدیریت"),
             BotCommand(command="help", description="❓ راهنما"),
         ]
         admin_extra = [
@@ -500,7 +503,7 @@ class JobEngine:
         eta = ""
         if info:
             speed = info.get("speed")
-            keys = row.keys()
+            keys = set(row.keys())
             src_dur = (row["source_duration"] if "source_duration" in keys
                        else (row["duration_s"] if "duration_s" in keys else None))
             if speed and speed > 0 and src_dur and progress > 0:
@@ -550,7 +553,7 @@ class JobEngine:
         """
         renewed = await self.db.fetchval(
             "UPDATE jobs SET updated_at = now() "
-            "WHERE id = $1 AND stage IN ('completing','validating','archiving') "
+            "WHERE id = $1 AND stage IN ('completing','validating','archiving','uploading') "
             "AND status IN ('queued','processing') RETURNING id",
             _as_uuid(job_id),
         )
@@ -574,6 +577,8 @@ class JobEngine:
     async def tiers_config(self) -> dict:
         """Persisted tier limits (app_config 'limits'), seeded from env.
 
+        Keys added in later versions (e.g. max_pending) are merged in from
+        the env defaults so an old persisted config never lacks a limit.
         Cached for 60s - admission hits this on every submission; the admin
         panel calls invalidate_tiers() after saving.
         """
@@ -581,10 +586,11 @@ class JobEngine:
         if self._tiers_cache and self._tiers_cache[1] > now:
             return self._tiers_cache[0]
         stored = await self.db.get_config("limits")
+        defaults = self.cfg.tier_defaults()
         if isinstance(stored, dict) and "normal" in stored and "vip" in stored:
-            result = stored
+            result = {t: {**defaults[t], **(stored.get(t) or {})} for t in ("normal", "vip")}
         else:
-            result = self.cfg.tier_defaults()
+            result = defaults
             await self.db.set_config("limits", result)
         self._tiers_cache = (result, now + 60)
         return result
@@ -620,6 +626,7 @@ class JobEngine:
             "max_duration_s": int(max_duration_min or 0) * 60,
             "daily_quota_bytes": int(daily_quota_gb or 0) * gb,
             "max_active": max(1, int(tier.get("max_active") or 1)),
+            "max_pending": max(1, int(tier.get("max_pending") or 10)),
             "max_per_hour": max(1, int(tier.get("max_per_hour") or 1)),
             "priority": 60 if is_vip else 50,
         }
@@ -630,6 +637,13 @@ class JobEngine:
     async def check_admission(self, tg_id: int, size_bytes: int,
                               allow_no_archive: bool = False,
                               is_admin: bool = False) -> None:
+        """Fast intake checks on Telegram metadata only (UX layer).
+
+        Disk is deliberately NOT checked here any more: a queued job is a
+        database row, not a file. Disk capacity is enforced by the
+        dispatcher right before a job is downloaded. The per-user checks are
+        repeated inside the registration transaction (_recheck_user_admission).
+        """
         if not allow_no_archive and not self.state.archive_channel_id:
             raise AdmissionError("archive_not_configured")
         if self.state.paused:
@@ -637,69 +651,49 @@ class JobEngine:
         user = await self.db.fetchrow("SELECT is_blocked FROM users WHERE tg_id = $1", tg_id)
         if user and user["is_blocked"]:
             raise AdmissionError("blocked_user")
+        queued = await self.db.fetchval("SELECT count(*) FROM jobs WHERE status = 'queued'")
+        if int(queued or 0) >= self.cfg.max_queued:
+            # Genuinely full: say so clearly - never pretend to accept.
+            raise AdmissionError("queue_full", cap=self.cfg.max_queued)
+        if is_admin:
+            return
         limits = await self.effective_limits(tg_id)
-        # Admins bypass every per-user fairness limit (size, duration,
-        # concurrency, rate, quota, queue cap). Physical disk safety and the
-        # pause switch still apply to them - they protect the server itself.
-        if not is_admin:
-            if size_bytes > limits["max_source_bytes"]:
-                raise AdmissionError("too_large_tier",
-                                     max_gb=limits["max_source_bytes"] // 1024**3)
-            # Per-user fairness first: deferred jobs also occupy a slot, otherwise
-            # disk pressure would let a user stack unbounded deferred jobs.
-            active = await self.db.fetchval(
-                "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
-                "AND status IN ('queued','processing','deferred')",
-                tg_id,
-            )
-            if active >= limits["max_active"]:
-                raise AdmissionError("user_busy", max_active=limits["max_active"])
-            hourly = await self.db.fetchval(
-                "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
-                "AND enqueued_at > now() - interval '1 hour'",
-                tg_id,
-            )
-            if hourly >= limits["max_per_hour"]:
-                raise AdmissionError("rate_limited")
-            daily = await self.db.fetchval(
-                "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
-                "AND enqueued_at > now() - interval '24 hours'",
-                tg_id,
-            )
-            if daily >= self.cfg.max_jobs_per_day:
-                raise AdmissionError("daily_quota", quota=self.cfg.max_jobs_per_day)
-            # Daily byte quota: total source volume of the last 24h.
-            if limits["daily_quota_bytes"]:
-                used_bytes = await self.db.fetchval(
-                    "SELECT coalesce(sum(source_size), 0) FROM jobs "
-                    "WHERE requester_tg_id = $1 "
-                    "AND enqueued_at > now() - interval '24 hours' "
-                    "AND status IN ('queued','processing','deferred','completed')",
-                    tg_id,
-                )
-                if int(used_bytes or 0) + size_bytes > limits["daily_quota_bytes"]:
-                    raise AdmissionError("daily_quota_bytes",
-                                         quota=media_mod.human_size(limits["daily_quota_bytes"]),
-                                         used=media_mod.human_size(int(used_bytes or 0)))
-            queued = await self.db.fetchval("SELECT count(*) FROM jobs WHERE status = 'queued'")
-            if queued >= self.cfg.max_queued:
-                raise AdmissionError("queue_full")
-        # Disk admission last: accounts for bytes already reserved by active
-        # jobs (ArgonsEncoder-style reservation accounting, PostgreSQL-backed).
-        need = int(size_bytes * self.cfg.admission_need_factor) \
-            + self.cfg.admission_floor_bytes
-        reserved = await self.db.fetchval(
-            "SELECT coalesce(sum(reserved_bytes), 0) FROM jobs "
-            "WHERE status IN ('queued', 'processing')"
+        if size_bytes > limits["max_source_bytes"]:
+            raise AdmissionError("too_large_tier",
+                                 max_gb=limits["max_source_bytes"] // 1024**3)
+        pending = await self.db.fetchval(
+            "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
+            "AND status IN ('queued','processing','deferred')",
+            tg_id,
         )
-        free = max(0, self._disk_free() - int(reserved or 0))
-        if free < need and self.cfg.disk_defer and not self.state.paused:
-            raise AdmissionDeferred(need)
-        if free < need:
-            raise AdmissionError("disk")
-        if free < self.cfg.disk_pause_free_bytes:
-            await self._auto_pause()
-            raise AdmissionError("disk")
+        if int(pending or 0) >= limits["max_pending"]:
+            raise AdmissionError("user_pending", max_pending=limits["max_pending"])
+        hourly = await self.db.fetchval(
+            "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
+            "AND enqueued_at > now() - interval '1 hour'",
+            tg_id,
+        )
+        if int(hourly or 0) >= limits["max_per_hour"]:
+            raise AdmissionError("rate_limited")
+        daily = await self.db.fetchval(
+            "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
+            "AND enqueued_at > now() - interval '24 hours'",
+            tg_id,
+        )
+        if int(daily or 0) >= self.cfg.max_jobs_per_day:
+            raise AdmissionError("daily_quota", quota=self.cfg.max_jobs_per_day)
+        if limits["daily_quota_bytes"]:
+            used_bytes = await self.db.fetchval(
+                "SELECT coalesce(sum(source_size), 0) FROM jobs "
+                "WHERE requester_tg_id = $1 "
+                "AND enqueued_at > now() - interval '24 hours' "
+                "AND status IN ('queued','processing','deferred','completed')",
+                tg_id,
+            )
+            if int(used_bytes or 0) + size_bytes > limits["daily_quota_bytes"]:
+                raise AdmissionError("daily_quota_bytes",
+                                     quota=media_mod.human_size(limits["daily_quota_bytes"]),
+                                     used=media_mod.human_size(int(used_bytes or 0)))
 
     async def check_duration_limit(self, tg_id: int, duration_s: float | None,
                                    is_admin: bool = False) -> None:
@@ -724,13 +718,13 @@ class JobEngine:
         AdmissionError codes the handlers already localize.
         """
         limits = await self.effective_limits(tg_id)
-        active = await conn.fetchval(
+        pending = await conn.fetchval(
             "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
             "AND status IN ('queued','processing','deferred')",
             tg_id,
         )
-        if int(active or 0) >= limits["max_active"]:
-            raise AdmissionError("user_busy", max_active=limits["max_active"])
+        if int(pending or 0) >= limits["max_pending"]:
+            raise AdmissionError("user_pending", max_pending=limits["max_pending"])
         hourly = await conn.fetchval(
             "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
             "AND enqueued_at > now() - interval '1 hour'",
@@ -845,340 +839,31 @@ class JobEngine:
     async def handle_submission(
         self, *, tg_id: int, chat_id: int | None, source_msg_id: int | None,
         status_msg_id: int | None, size_bytes: int, filename: str | None,
-        profile_key: str, file_id: str | None = None, file_unique_id: str | None = None,
-        local_path: str | None = None, allow_no_archive: bool = False,
-        target_mb: int | None = None, compress_level: int | None = None,
-        allow_reuse: bool = True,
+        profile_key: str = edu480.PROFILE_KEY, file_id: str | None = None,
+        file_unique_id: str | None = None, local_path: str | None = None,
+        allow_no_archive: bool = False, target_mb: int | None = None,
+        compress_level: int | None = None, allow_reuse: bool = True,
+        output_name: str | None = None, duration_s: float | None = None,
     ) -> dict:
-        prof = BY_KEY.get(profile_key)
-        if not prof:
-            raise AdmissionError("bad_profile")
-        is_admin = tg_id in await self.admin_ids()
-        profile_params: dict | None = None
-        low_bitrate = False
-        if profile_key == "custom":
-            if not target_mb:
-                raise AdmissionError("bad_target", detail="target size required")
-            # bitrate computed after probing, below
-        if profile_key == "level":
-            if not compress_level:
-                raise AdmissionError("bad_profile")
-            profile_params = {
-                "crf": str(crf_for_level(compress_level)),
-                "preset": preset_for_level(compress_level),
-            }
-        deferred_need = None
-        try:
-            await self.check_admission(tg_id, size_bytes,
-                                       allow_no_archive=allow_no_archive,
-                                       is_admin=is_admin)
-        except AdmissionDeferred as exc:
-            deferred_need = exc.need
+        """Compatibility entry point (merge flow, internal test API).
 
-        if local_path:
-            src_path = Path(local_path)
-            if not src_path.is_file():
-                raise AdmissionError("source_missing")
-        else:
-            try:
-                tg_file = await self.bot.get_file(file_id)
-            except TelegramAPIError as exc:
-                log.warning("get_file failed", extra={"detail": str(exc)[:200]})
-                raise AdmissionError("download_failed") from exc
-            src_path = await self.resolve_local_path(tg_file.file_path)
-            if src_path is None:
-                raise AdmissionError("download_failed")
-
-        try:
-            media_id, sha, probe, stable_path = await self.register_media(
-                src_path=src_path,
-                size_bytes=size_bytes,
-                filename=filename or src_path.name,
-                tg_file_id=file_id,
-                tg_file_unique_id=file_unique_id,
-            )
-        except media_mod.MediaError as exc:
-            raise AdmissionError("invalid_media", detail=str(exc)[:120]) from exc
-
-        await self.check_duration_limit(tg_id, probe.get("duration_s"), is_admin=is_admin)
-
-        if profile_key == "custom":
-            profile_params, low_bitrate, err = self._custom_params(
-                target_mb, probe.get("duration_s"), size_bytes)
-            if err:
-                raise AdmissionError("bad_target", detail=str(target_mb))
-        if profile_key == "remux" and not media_mod.remux_compatible(probe):
-            raise AdmissionError("invalid_media", detail="remux not applicable (codec/container)")
-
-        await self.db.bump("requests_total")
-        await self.db.bump("bytes_in", size_bytes)
-        if chat_id is not None:
-            await self.db.execute(
-                "UPDATE users SET last_seen_at = now(), total_requests = total_requests + 1 "
-                "WHERE tg_id = $1",
-                tg_id,
-            )
-
-        version = prof.version
-        lock_key = f"{sha}:{profile_key}:v{version}"
-        # Submission-time personal-settings snapshot (multi-admin isolation,
-        # spec 4.4): a job must never re-read mutable per-admin config while
-        # processing, and two admins submitting simultaneously must not see
-        # each other's thumbnail/caption/watermark. One indexed lookup for
-        # everyone - regular users simply have no admin_settings row.
-        snap = await self.db.fetchrow(
-            """
-            SELECT thumbnail_path, caption, caption_mode, watermark,
-                   watermark_enabled
-            FROM admin_settings WHERE tg_id = $1
-            """,
-            tg_id,
-        )
-        personal_thumb = (snap["thumbnail_path"] if snap else None) or None
-        if personal_thumb and not Path(personal_thumb).is_file():
-            log.warning("personal thumbnail file missing at submission",
-                        extra={"detail": personal_thumb})
-            personal_thumb = None
-        personal_caption = (snap["caption"] if snap else None) or None
-        caption_mode = (snap["caption_mode"] if snap else None) or "replace"
-        watermark_json = None
-        if snap and snap["watermark_enabled"] and snap["watermark"]:
-            watermark_json = json.dumps(snap["watermark"])
-        async with self.db.pool.acquire() as conn:
-            async with conn.transaction():
-                # Per-user admission lock first (F9), then the dedup key:
-                # serialize a user's concurrent submissions so the in-tx
-                # recheck below cannot be raced (Argons per-user pattern).
-                if not is_admin:
-                    await conn.execute(
-                        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
-                        f"admit:{tg_id}",
-                    )
-                    await self._recheck_user_admission(conn, tg_id, size_bytes)
-                await conn.execute(
-                    "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", lock_key
-                )
-                reusable_parts = await dedup.find_reusable_parts(self.db, sha, profile_key, version)
-                reusable = reusable_parts[0] if reusable_parts else None
-                reuse_kind = "exact"
-                similarity = False
-                name_norm = media_mod.sanitize_filename(filename or src_path.name).lower()
-                if reusable is None and profile_key in ("custom", "level"):
-                    # Fuzzy layer: size + normalized name + duration window.
-                    fuzzy = await dedup.find_fuzzy_archive(
-                        self.db, size_bytes=size_bytes, name_norm=name_norm,
-                        duration_s=probe.get("duration_s") or 0.0,
-                        profile=profile_key,
-                    )
-                    if fuzzy is not None:
-                        reusable_parts = await dedup.find_reusable_parts(
-                            self.db, fuzzy["source_sha256"], profile_key, version
-                        )
-                        reusable = reusable_parts[0] if reusable_parts else None
-                        reuse_kind = "fuzzy"
-                if reusable is None and self.cfg.similarity_reuse:
-                    frames = await self._frames_for(media_id)
-                    if frames:
-                        similar_src = await dedup.find_similar_archive(
-                            self.db, self.cfg, sha,
-                            probe.get("duration_s") or 0.0, frames,
-                            profile_key, version,
-                            acodec=probe.get("acodec"),
-                            audio_channels=probe.get("audio_channels"),
-                        )
-                        if similar_src is not None:
-                            reusable_parts = await dedup.find_reusable_parts(
-                                self.db, similar_src["sha256"], profile_key, version
-                            )
-                            reusable = reusable_parts[0] if reusable_parts else None
-                            similarity = reusable is not None
-                if reusable is not None:
-                    if (profile_key == "level" and reusable["status"] == "no_gain"
-                            and profile_params and not (self.cfg.cache_offer and allow_reuse)):
-                        # A previous CRF attempt already lost to this source -
-                        # skip the doomed x264 pass, go straight to HEVC.
-                        # (Skipped when a cache offer will be shown: the user
-                        # gets the previous result anyway, and if they decline
-                        # the re-picked level escalates here.)
-                        try:
-                            x265_crf = int(str(profile_params.get("crf", "28"))) + 5
-                        except (TypeError, ValueError):
-                            x265_crf = 33
-                        escal_job = await conn.fetchval(
-                            """
-                            INSERT INTO jobs(requester_tg_id, media_id, profile, profile_version,
-                                             effective_profile, status, priority, source_size,
-                                             source_path, source_message_id, status_message_id,
-                                             progress_changed_at, stage, profile_params, reserved_bytes,
-                                             personal_thumb_path, personal_caption, caption_mode,
-                                             watermark_json)
-                            VALUES ($1,$2,$3,$4,'level265','queued',$5,$6,$7,$8,$9, now(),
-                                    'queued', $10::jsonb, $11, $12, $13, $14, $15)
-                            RETURNING id
-                            """,
-                            tg_id, media_id, profile_key, version,
-                            (await self.effective_limits(tg_id))["priority"],
-                            size_bytes, stable_path, source_msg_id, status_msg_id,
-                            json.dumps({"crf": str(x265_crf), "preset": "superfast"}),
-                            int(size_bytes * self.cfg.admission_need_factor)
-                            + self.cfg.admission_floor_bytes,
-                            personal_thumb, personal_caption, caption_mode, watermark_json,
-                        )
-                        await conn.execute(
-                            """
-                            INSERT INTO job_requesters
-                                (job_id, tg_id, chat_id, source_message_id, status_message_id)
-                            VALUES ($1, $2, $3, $4, $5)
-                            ON CONFLICT (job_id, tg_id) DO NOTHING
-                            """,
-                            escal_job, tg_id, chat_id or 0, source_msg_id, status_msg_id,
-                        )
-                        await self.db.bump("level_escalations")
-                        # no spawn: the poller submits it right after commit
-                        return {"outcome": "queued", "job_id": str(escal_job),
-                                "low_bitrate": False, "bitrate": probe.get("bitrate"),
-                                "estimate": ""}
-                    if self.cfg.cache_offer and allow_reuse:
-                        # Interactive cache offer: show the user the best
-                        # already-compressed version (any profile) and let
-                        # them accept it, pick a strictly-lower profile, or
-                        # cancel - never silently deliver (CACHE-01).
-                        versions = quality_mod.group_versions(
-                            await dedup.find_cached_versions(
-                                self.db, reusable["source_sha256"]))
-                        best = quality_mod.pick_best_version(versions)
-                        if best is not None:
-                            await self.db.bump("cache_offers")
-                            log.info("cache offer raised", extra={
-                                "detail": f"sha={reusable['source_sha256'][:12]} "
-                                          f"profile={best['profile']} kind={reuse_kind}"})
-                        return self._offer_result(
-                            reusable["source_sha256"], reuse_kind, best, versions, probe)
-                    if allow_reuse or not self.cfg.cache_offer:
-                        return await self._reuse_archive(
-                            reusable_parts, tg_id=tg_id, chat_id=chat_id,
-                            status_msg_id=status_msg_id, profile_key=profile_key,
-                            sha=sha, size_bytes=size_bytes,
-                            reuse_kind="fuzzy" if reuse_kind == "fuzzy" else
-                            ("similar" if similarity else "exact"),
-                        )
-                    # allow_reuse=False (user declined the offer): fall
-                    # through - never silently reuse after an explicit no.
-                inflight = await dedup.find_inflight_job(self.db, sha, profile_key, version)
-                if inflight is None and profile_key in ("custom", "level"):
-                    inflight = await dedup.find_fuzzy_inflight_job(
-                        self.db, size_bytes=size_bytes, name_norm=name_norm,
-                        duration_s=probe.get("duration_s") or 0.0,
-                        profile=profile_key,
-                    )
-                if inflight is not None:
-                    await conn.execute(
-                        """
-                        INSERT INTO job_requesters
-                            (job_id, tg_id, chat_id, source_message_id, status_message_id)
-                        VALUES ($1,$2,$3,$4,$5)
-                        ON CONFLICT (job_id, tg_id) DO NOTHING
-                        """,
-                        inflight["id"], tg_id, chat_id or 0, source_msg_id, status_msg_id,
-                    )
-                    await self.db.bump("dedup_inflight_joined")
-                    return {"outcome": "joined", "job_id": str(inflight["id"])}
-
-                # Any-profile cache offer (CACHE-02): the chosen profile has
-                # no cached result, but another profile's version exists.
-                # In-flight joins stay ahead of this - if the exact encode the
-                # user asked for is already running, joining it beats offering
-                # a lower-tier cache.
-                if self.cfg.cache_offer and allow_reuse:
-                    offer_sha = sha
-                    offer_rows = await dedup.find_cached_versions(self.db, sha)
-                    if not offer_rows and profile_key in ("custom", "level"):
-                        fuzzy_sha = await dedup.find_fuzzy_source(
-                            self.db, size_bytes=size_bytes, name_norm=name_norm,
-                            duration_s=probe.get("duration_s") or 0.0,
-                        )
-                        if fuzzy_sha:
-                            offer_sha = fuzzy_sha
-                            offer_rows = await dedup.find_cached_versions(self.db, fuzzy_sha)
-                    versions = quality_mod.group_versions(offer_rows)
-                    best = quality_mod.pick_best_version(versions)
-                    if best is not None:
-                        await self.db.bump("cache_offers")
-                        log.info("cache offer raised (cross-profile)", extra={
-                            "detail": f"sha={offer_sha[:12]} "
-                                      f"profile={best['profile']}"})
-                        return self._offer_result(
-                            offer_sha, reuse_kind, best, versions, probe)
-
-                # Adaptive Decision Engine: Smart fastpath, dynamic preset & rate control
-                dec = decision_engine.make_decision(
-                    probe=probe,
-                    profile_key=profile_key,
-                    size_bytes=size_bytes,
-                    target_mb=target_mb,
-                    compress_level=compress_level,
-                    settings=self.cfg,
-                    active_jobs=1,
-                )
-                if dec.action == "remux_only":
-                    effective_profile = "remux"
-                    profile_params = None
-                elif profile_key in ("r1080", "r720", "r480"):
-                    effective_profile = resolve_variant(profile_key, probe.get("width"), probe.get("height"))
-                elif profile_key == "custom" and dec.two_pass:
-                    effective_profile = "custom_2pass"
-                    if dec.profile_params:
-                        profile_params = dec.profile_params
-                else:
-                    effective_profile = dec.effective_profile
-                    if dec.profile_params:
-                        profile_params = dec.profile_params
-
-                job_id = await conn.fetchval(
-                    """
-                    INSERT INTO jobs(requester_tg_id, media_id, profile, profile_version,
-                                     effective_profile, status, priority, source_size,
-                                     source_path, source_message_id, status_message_id,
-                                     progress_changed_at, stage, profile_params, reserved_bytes,
-                                     personal_thumb_path, personal_caption, caption_mode,
-                                     watermark_json)
-                    VALUES ($1,$2,$3,$4,$5,$6,$14,$7,$8,$9,$10, now(),
-                            $11, $12::jsonb, $13, $15, $16, $17, $18)
-                    RETURNING id
-                    """,
-                    tg_id, media_id, profile_key, version,
-                    effective_profile,
-                    "deferred" if deferred_need else "queued",
-                    size_bytes, stable_path, source_msg_id, status_msg_id,
-                    "deferred" if deferred_need else "queued",
-                    json.dumps(profile_params) if profile_params else None,
-                    deferred_need or int(size_bytes * self.cfg.admission_need_factor)
-                    + self.cfg.admission_floor_bytes,
-                    70 if is_admin else (await self.effective_limits(tg_id))["priority"],
-                    personal_thumb, personal_caption, caption_mode, watermark_json,
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO job_requesters
-                        (job_id, tg_id, chat_id, source_message_id, status_message_id)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (job_id, tg_id) DO NOTHING
-                    """,
-                    job_id, tg_id, chat_id or 0, source_msg_id, status_msg_id,
-                )
-        job_id = _as_uuid(job_id)
-        if deferred_need:
-            log.info("job deferred for disk capacity",
-                     extra={"job_id": str(job_id), "detail": f"need={deferred_need}"})
-            return {"outcome": "deferred", "job_id": str(job_id),
-                    "bitrate": probe.get("bitrate"),
-                    "estimate": self._estimate_text(profile_key, probe, deferred_need)}
-        self.spawn(self.run_job(str(job_id)))
-        return {"outcome": "queued", "job_id": str(job_id),
-                "kbps": (profile_params or {}).get("bv"),
-                "low_bitrate": low_bitrate,
-                "bitrate": probe.get("bitrate"),
-                "estimate": self._estimate_text(profile_key, probe, None, profile_params)}
+        Every submission now goes through the metadata-first queue and the
+        single EDU480 profile; legacy profile/level/target arguments are
+        accepted for call-site compatibility and ignored. Nothing is
+        downloaded here.
+        """
+        if local_path and not Path(local_path).is_file():
+            raise AdmissionError("source_missing")
+        if profile_key not in (edu480.PROFILE_KEY, "educational", None):
+            log.info("legacy profile request mapped to EDU480",
+                     extra={"profile": profile_key})
+        return await self.register_job(
+            tg_id=tg_id, chat_id=chat_id or tg_id, source_msg_id=source_msg_id,
+            status_msg_id=status_msg_id, file_id=file_id,
+            file_unique_id=file_unique_id, size_bytes=size_bytes,
+            filename=filename or (Path(local_path).name if local_path else None),
+            duration_s=duration_s, output_name=output_name or filename,
+            local_path=local_path, allow_no_archive=allow_no_archive)
 
     def _estimate_text(self, profile_key: str, probe: dict,
                        deferred_need: int | None = None,
@@ -1372,9 +1057,12 @@ class JobEngine:
                             filename: str | None) -> str:
         """Expose the bot-api source under a token-free /media path.
 
-        The bot-api volume and the /media bind are different devices, so a
-        hardlink raises EXDEV and we fall back to a chunked copy with live
-        progress on the user's status card. Returns the staged path.
+        The Local Bot API path contains the bot token and Encore logs the
+        full FFmpeg command, so the raw path is never handed to Encore.
+        With WORKERS_READ_BOTAPI=true (botapi_data mounted read-only into the
+        workers at the same path) a SYMLINK is created: zero bytes copied,
+        no duplicate multi-GB file. Otherwise a hardlink is tried, then a
+        chunked copy with live progress (the old behaviour).
         """
         used_path = str(source)
         if not used_path.startswith(self.cfg.botapi_dir):
@@ -1383,20 +1071,26 @@ class JobEngine:
         if ext not in COPY_EXTS:
             ext = ".bin"
         staged = Path(self.cfg.media_incoming) / job_id / f"source{ext}"
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        if self.cfg.workers_read_botapi:
+            try:
+                if staged.is_symlink() or staged.exists():
+                    staged.unlink()
+                staged.symlink_to(source)
+                log.info("staging via symlink (no copy)", extra={"job_id": job_id})
+                return str(staged)
+            except OSError as exc:
+                log.warning("symlink staging failed, falling back to copy",
+                            extra={"job_id": job_id, "detail": str(exc)[:80]})
         # Trust an existing staged file only when it matches the source size:
         # a crashed copy used to leave a truncated file that was silently
         # encoded later (F4).
         total = source.stat().st_size
-        if staged.exists() and staged.stat().st_size == total:
+        if staged.exists() and not staged.is_symlink() and staged.stat().st_size == total:
             return str(staged)
-        staged.parent.mkdir(parents=True, exist_ok=True)
         try:
             await asyncio.to_thread(os.link, source, staged)
         except OSError:
-            # Cross-device fallback: copy to a .part sibling, verify the size,
-            # then atomically swap it in. A crash mid-copy leaves at worst a
-            # discarded .part, never a truncated "source" (Argons tmp+replace
-            # pattern).
             part = staged.with_name(staged.name + ".part")
             self._copy_state[job_id] = {"done": 0, "total": total, "t0": time.time()}
             reporter = asyncio.create_task(self._report_copy_progress(job_id))
@@ -1418,252 +1112,29 @@ class JobEngine:
                         pass
         if not os.path.isfile(staged):
             raise media_mod.MediaError("staging failed: staged file missing")
-        log.info("staging done", extra={
-            "job_id": job_id,
-            "detail": f"path={staged} size={os.path.getsize(staged)}"})
+        log.info("staging done", extra={"job_id": job_id,
+                                        "detail": f"size={os.path.getsize(staged)}"})
         return str(staged)
 
     async def run_job(self, job_id: str) -> None:
-        if job_id in self._submitting:
-            return
-        self._submitting.add(job_id)
-        try:
-            row = await self.db.fetchrow(
-                """
-                SELECT j.id, j.media_id, j.effective_profile, j.status, j.encore_job_id,
-                       j.source_path, j.source_size, j.input_params, j.profile_params,
-                       j.requester_tg_id, j.status_message_id, j.retries,
-                       m.duration_s, m.filename, m.fingerprinted
-                FROM jobs j JOIN media_assets m ON m.id = j.media_id
-                WHERE j.id = $1
-                """,
-                _as_uuid(job_id),
-            )
-            if row is None or row["status"] not in ("queued", "processing"):
-                return
-            if row["encore_job_id"]:
-                return
+        """Compatibility shim: (re)queue a job for the dispatcher.
 
-            source = Path(row["source_path"]) if row["source_path"] else None
-            if source is None or not source.is_file():
-                source = await self._refetch_source(row)
-            if source is None or not source.is_file():
-                # Original gone (bot-api eviction + refetch failed): fall back
-                # to the best archived derivative rather than failing outright
-                # (CACHE-05). The fallback recomputes the effective profile
-                # against the derivative's real dims - never upscaling.
-                source = await self._derivative_fallback(row)
-                if source is None:
-                    await self.fail_job(row, "source_unavailable", "source file vanished")
-                    return
-
-            free = self._disk_free()
-            reserved = await self.db.fetchval(
-                "SELECT coalesce(sum(reserved_bytes), 0) FROM jobs "
-                "WHERE status IN ('queued', 'processing') AND id <> $1",
-                _as_uuid(job_id),
-            )
-            need = int((row["source_size"] or 0) * self.cfg.admission_need_factor) \
-                + self.cfg.admission_floor_bytes
-            if max(0, free - int(reserved or 0)) < need:
-                if self.cfg.disk_defer:
-                    # Capacity vanished between admission and start - defer
-                    # instead of failing; promote_deferred picks it up later.
-                    await self.db.execute(
-                        "UPDATE jobs SET status='deferred', stage='deferred', "
-                        "reserved_bytes=$2, updated_at=now() "
-                        "WHERE id=$1 AND status IN ('queued','processing')",
-                        _as_uuid(job_id), need,
-                    )
-                    for r in await self.db.fetch(
-                        "SELECT chat_id, status_message_id, tg_id FROM job_requesters "
-                        "WHERE job_id = $1",
-                        _as_uuid(job_id),
-                    ):
-                        self._edit_status(
-                            r["chat_id"], r["status_message_id"],
-                            tr("status_deferred", await self._lang(r["tg_id"])), force=True,
-                        )
-                    return
-                await self._retry_or_fail(row, "disk", "disk space below safe threshold")
-                return
-
-            # The source lives on the bot-api volume (hashed in place at
-            # registration). Its absolute path contains the bot token, so it
-            # must never be handed to Encore (which logs the full ffmpeg
-            # command at INFO) ??? _stage_source aliases it into /media.
-            used_path = await self._stage_source(job_id, source, row["filename"])
-
-            await self._set_stage(job_id, "copying")
-            await self.db.execute(
-                "UPDATE jobs SET started_at = COALESCE(started_at, now()) WHERE id = $1",
-                _as_uuid(job_id),
-            )
-            # Single fingerprint submission (SPEC-03): register_media used to
-            # submit too - the worker's "WHERE fingerprinted = FALSE" guard
-            # made the second pass pure wasted CPU on a 4GB decode.
-            if not row["fingerprinted"]:
-                self.fingerprinter.submit(row["media_id"], used_path,
-                                          row["duration_s"] or 0.0)
-
-            # --- remux utility: stream-copy container shift, no Encore job ---
-            if (row["effective_profile"] or "") == "remux":
-                out_dir = Path(self.cfg.media_out) / job_id
-                out_dir.mkdir(parents=True, exist_ok=True)
-                out_path = out_dir / "out.mp4"
-                await self.db.execute(
-                    "UPDATE jobs SET status='processing', stage='encoding', "
-                    "progress_changed_at=now(), updated_at=now() WHERE id = $1",
-                    _as_uuid(job_id),
-                )
-                try:
-                    await asyncio.to_thread(
-                        media_mod.remux_to_mp4, used_path, str(out_path)
-                    )
-                except media_mod.MediaError as exc:
-                    await self.fail_job(row, "remux", str(exc)[:200])
-                    return
-                full_row = await self.db.fetchrow(
-                    "SELECT j.*, m.duration_s AS source_duration FROM jobs j "
-                    "JOIN media_assets m ON m.id = j.media_id WHERE j.id = $1",
-                    _as_uuid(job_id),
-                )
-                await self.complete_job(full_row, None)
-                return
-
-            callback = (
-                f"http://bot:8080/internal/encore-callback"
-                f"?job={job_id}&sig={self._callback_sig(job_id)}"
-            )
-            # Segmented (chunk-parallel) transcoding for long sources: Encore
-            # splits the job into segmentLength chunks processed concurrently
-            # by all workers against the shared work dir. Excluded: profiles
-            # whose profileParams use SpEL (repair input-params interplay,
-            # custom bitrate, level CRF).
-            segment_length = None
-            if (self.cfg.segment_enabled
-                    and (row["duration_s"] or 0) >= self.cfg.segment_min_duration
-                    and (row["effective_profile"] or "") not in
-                    ("repair", "custom", "level")):
-                segment_length = self.cfg.segment_length
-            try:
-                encore_id = await self.encre.submit_job(
-                    profile=row["effective_profile"] or "balanced",
-                    output_folder=f"{self.cfg.media_out}/{job_id}",
-                    base_name="out",
-                    input_uri=used_path,
-                    external_id=job_id,
-                    callback_uri=callback,
-                    profile_params=_load_json(row["profile_params"]),
-                    input_params=_load_json(row["input_params"]),
-                    segment_length=segment_length,
-                )
-            except EncoreError as exc:
-                await self._retry_or_fail(row, "encore_api", str(exc)[:300])
-                return
-            claimed = await self.db.execute(
-                "UPDATE jobs SET encore_job_id = $2, status = 'processing', stage = 'encoding', "
-                "progress_changed_at = now(), updated_at = now() "
-                "WHERE id = $1 AND encore_job_id IS NULL AND status IN ('queued','processing')",
-                _as_uuid(job_id), encore_id,
-            )
-            if claimed == "UPDATE 0":
-                return
-            log.info("job submitted to encore", extra={
-                "job_id": job_id, "encore_job": encore_id,
-                "detail": f"input exists={os.path.exists(used_path)}"})
-        except Exception:  # noqa: BLE001
-            log.exception("run_job crashed", extra={"job_id": job_id})
-            try:
-                row = await self.db.fetchrow("SELECT * FROM jobs WHERE id = $1", _as_uuid(job_id))
-                if row and row["status"] in ("queued", "processing"):
-                    await self.fail_job(row, "unknown", "internal error")
-            except Exception:  # noqa: BLE001
-                log.exception("fail_job after crash also failed", extra={"job_id": job_id})
-        finally:
-            self._submitting.discard(job_id)
-
-    async def _refetch_source(self, row):
-        """Re-create the stable media copy from the bot-api file if it vanished."""
-        media = await self.db.fetchrow(
-            "SELECT tg_file_id, filename FROM media_assets WHERE id = $1", row["media_id"]
-        )
-        if not media or not media["tg_file_id"]:
-            return None
-        try:
-            tg_file = await self.bot.get_file(media["tg_file_id"])
-        except TelegramAPIError:
-            return None
-        botapi_path = await self.resolve_local_path(tg_file.file_path)
-        if botapi_path is None:
-            return None
-        ext = Path(media["filename"] or "source.mp4").suffix.lower()
-        if ext not in COPY_EXTS:
-            ext = ".bin"
-        stable = Path(self.cfg.media_incoming) / f"m-{row['media_id']}" / f"source{ext}"
-        stable.parent.mkdir(parents=True, exist_ok=True)
-        sha = await media_mod.copy_and_hash(botapi_path, stable)
-        await self.db.execute(
-            "UPDATE media_assets SET sha256 = $2 WHERE id = $1", row["media_id"], sha
-        )
-        await self.db.execute(
-            "UPDATE jobs SET source_path = $2 WHERE id = $1", row["id"], str(stable)
-        )
-        return stable
-
-    async def _derivative_fallback(self, row):
-        """Original source gone: serve the job from the best archived derivative.
-
-        Tries candidates best-quality-first and stops at the first one whose
-        Telegram file is still fetchable. The effective profile is recomputed
-        against the derivative's REAL dims (resolve_variant never upscales),
-        so a 720p request served from a 480p copy becomes a 480p encode and
-        is flagged source_degraded - the user is never told it is the full
-        quality of their original (CACHE-05, spec rule 5).
+        Jobs are no longer started directly by callers; every start goes
+        through the dispatcher's atomic claim so capacity, disk and fairness
+        are always respected. A 'processing' job without an Encore id and
+        without a live pipeline in this process (crash/restart leftovers)
+        is put back to 'queued'.
         """
-        src = await self.db.fetchrow(
-            "SELECT sha256 FROM media_assets WHERE id = $1", row["media_id"]
-        )
-        if not src or not src["sha256"]:
-            return None
-        versions = quality_mod.group_versions(
-            await dedup.find_cached_versions(self.db, src["sha256"])
-        )
-        candidates = [
-            v for v in versions
-            if v["status"] == "active" and v["out_tg_file_id"]
-            and v["out_w"] and v["out_h"]
-        ]
-        while candidates:
-            best = quality_mod.pick_best_version(candidates)
-            if best is None:
-                break
-            candidates = [v for v in candidates if v is not best]
-            try:
-                tg_file = await self.bot.get_file(best["out_tg_file_id"])
-            except TelegramAPIError as exc:
-                log.warning("derivative fetch failed", extra={
-                    "job_id": str(row["id"]), "detail": str(exc)[:150]})
-                continue
-            path = await self.resolve_local_path(tg_file.file_path)
-            if path is None:
-                continue
-            prof = BY_KEY.get(row["profile"])
-            eff = row["effective_profile"]
-            if prof is not None and prof.max_short_side:
-                eff = resolve_variant(row["profile"], best["out_w"], best["out_h"])
-            await self.db.execute(
-                "UPDATE jobs SET source_degraded = TRUE, effective_profile = $2, "
-                "updated_at = now() WHERE id = $1",
-                row["id"], eff,
-            )
-            await self.db.bump("degraded_source_fallbacks")
-            log.warning("encoding from archived derivative", extra={
-                "job_id": str(row["id"]),
-                "detail": f"from={best['profile']} {best['out_w']}x{best['out_h']} "
-                          f"effective={eff}"})
-            return Path(path)
-        return None
+        jid = str(job_id)
+        if jid in self._pipelines:
+            return
+        await self.db.execute(
+            "UPDATE jobs SET status = 'queued', stage = 'queued', worker_id = NULL, "
+            "lease_expires_at = NULL, reserved_bytes = 0, updated_at = now() "
+            "WHERE id = $1 AND status = 'processing' AND encore_job_id IS NULL "
+            "AND coalesce(stage, '') <> ALL($2::text[])",
+            _as_uuid(jid), list(POST_ENCODE_STAGES))
+        self.kick_dispatch()
 
     # ------------------------------------------------------------------
     # merge jobs (spec: Merge / Merge + Compress)
@@ -1889,41 +1360,33 @@ class JobEngine:
                 row["id"], need,
             )
             log.info("deferred job promoted", extra={"job_id": str(row["id"])})
-            self.spawn(self.run_job(str(row["id"])))
+            self.kick_dispatch()
 
     async def poll_once(self) -> None:
+        """One scheduler tick: recover leases, dispatch, reconcile Encore,
+        refresh queued cards (bounded)."""
         try:
             await self.promote_deferred()
         except Exception:  # noqa: BLE001
             log.exception("promote_deferred failed")
+        try:
+            await self.reap_stale_leases()
+        except Exception:  # noqa: BLE001
+            log.exception("lease reaper failed")
+        try:
+            await self.dispatch_once()
+        except Exception:  # noqa: BLE001
+            log.exception("dispatch failed")
         rows = await self.db.fetch(
             "SELECT j.*, m.duration_s AS source_duration FROM jobs j "
             "JOIN media_assets m ON m.id = j.media_id "
-            "WHERE j.status IN ('queued','processing') "
-            "ORDER BY j.priority DESC, j.enqueued_at"
+            "WHERE j.status = 'processing' AND j.encore_job_id IS NOT NULL "
+            "AND coalesce(j.stage, '') <> ALL($1::text[]) "
+            "ORDER BY j.priority DESC, j.enqueued_at",
+            list(POST_ENCODE_STAGES),
         )
         for row in rows:
             job_id = str(row["id"])
-            if not row["encore_job_id"]:
-                if row["status"] == "queued":
-                    # live queue position on the user's status card
-                    try:
-                        pos = await self.db.fetchval(
-                            "SELECT count(*) + 1 FROM jobs WHERE status IN ('queued','deferred') "
-                            "AND (priority > $1 OR (priority = $1 AND enqueued_at < $2))",
-                            row["priority"], row["enqueued_at"],
-                        )
-                        lang = await self._lang(row["requester_tg_id"])
-                        self._edit_status(
-                            row["requester_tg_id"], row["status_message_id"],
-                            self._progress_text(row, lang, {"queue_pos": pos}),
-                            markup=self._cancel_markup(job_id, lang),
-                        )
-                    except Exception:  # noqa: BLE001 - informational only
-                        pass
-                if job_id not in self._submitting:
-                    self.spawn(self.run_job(job_id))
-                continue
             try:
                 await self.reconcile_job(row)
             except EncoreNotFound:
@@ -1933,6 +1396,10 @@ class JobEngine:
                             extra={"job_id": job_id, "detail": str(exc)[:200]})
             except Exception:  # noqa: BLE001
                 log.exception("poll_once job error", extra={"job_id": job_id})
+        try:
+            await self.refresh_queue_cards()
+        except Exception:  # noqa: BLE001
+            log.exception("queue card refresh failed")
 
     async def poll_job(self, job_id: str) -> None:
         row = await self.db.fetchrow(
@@ -1940,7 +1407,8 @@ class JobEngine:
             "JOIN media_assets m ON m.id = j.media_id WHERE j.id = $1",
             _as_uuid(job_id),
         )
-        if row and row["encore_job_id"] and row["status"] in ("queued", "processing"):
+        if (row and row["encore_job_id"] and row["status"] == "processing"
+                and (row["stage"] or "") not in POST_ENCODE_STAGES):
             try:
                 await self.reconcile_job(row)
             except EncoreNotFound:
@@ -1997,23 +1465,28 @@ class JobEngine:
         ]])
 
     async def _broadcast_progress(self, row, info: dict) -> None:
-        primary_lang = await self._lang(row["requester_tg_id"])
-        self._edit_status(
-            row["requester_tg_id"], row["status_message_id"],
-            self._progress_text(row, primary_lang, info),
-            markup=self._cancel_markup(str(row["id"]), primary_lang),
+        """Live encode card for every requester (throttled edits)."""
+        await self.push_stage_card(str(row["id"]), info, force=False)
+
+    async def _requeue(self, row, *, category: str, detail: str,
+                       input_params: dict | None = None,
+                       profile_params: dict | None = None) -> bool:
+        """Put a job back in the queue for another attempt (dispatcher
+        re-claims it; an already-downloaded source is reused, not refetched)."""
+        done = await self.db.fetchval(
+            "UPDATE jobs SET status = 'queued', stage = 'queued', retries = retries + 1, "
+            "encore_job_id = NULL, progress = 0, error_category = $2, error_message = $3, "
+            "input_params = COALESCE($4::jsonb, input_params), "
+            "profile_params = COALESCE($5::jsonb, profile_params), "
+            "worker_id = NULL, lease_expires_at = NULL, reserved_bytes = 0, "
+            "updated_at = now() "
+            "WHERE id = $1 AND status IN ('queued','processing') RETURNING id",
+            row["id"], category, media_mod.redact(detail)[:500],
+            json.dumps(input_params) if input_params else None,
+            json.dumps(profile_params) if profile_params else None,
         )
-        for r in await self.db.fetch(
-            "SELECT chat_id, status_message_id, tg_id FROM job_requesters "
-            "WHERE job_id = $1 AND tg_id <> $2",
-            row["id"], row["requester_tg_id"],
-        ):
-            lang = await self._lang(r["tg_id"])
-            self._edit_status(
-                r["chat_id"], r["status_message_id"],
-                self._progress_text(row, lang, info),
-                markup=self._cancel_markup(str(row["id"]), lang),
-            )
+        self.kick_dispatch()
+        return bool(done)
 
     async def _retry_or_fail(self, row, category: str, detail: str) -> None:
         detail_l = detail.lower()
@@ -2021,54 +1494,25 @@ class JobEngine:
             marker in detail_l for marker in MUX_ERROR_MARKERS
         )
         current_params = _load_json(row["input_params"]) or {}
-        # ffmpeg "exit 183 / Nothing was encoded" sources (decoder finds no
-        # usable frames) are deliberately NOT routed through the repair
-        # ladder: genpts/aresample cannot fix an empty stream, and a retry
-        # would burn a full encode pass on a doomed input. They stay
-        # cleanly categorized as `ffmpeg` with the message stored.
-        # Two-stage repair for damaged sources:
+        prof_params = _load_json(row["profile_params"]) or {}
+        # Two-stage repair for damaged sources, staying on EDU480:
         # 1st mux failure -> regenerate PTS + discard corrupt packets;
-        # 2nd mux failure -> also switch to the `repair` profile (async audio).
+        # 2nd mux failure -> additionally resample async audio.
+        # ("Nothing was encoded" sources are not retried: an empty stream
+        # cannot be repaired and a retry would waste a full encode pass.)
         if is_mux_error and not current_params and row["retries"] < self.cfg.job_retries + 1:
-            await self.db.execute(
-                "UPDATE jobs SET status = 'queued', retries = retries + 1, "
-                "encore_job_id = NULL, progress = 0, error_category = $2, "
-                "error_message = $3, input_params = $4::jsonb, updated_at = now() "
-                "WHERE id = $1 AND status IN ('queued','processing')",
-                row["id"], category, detail,
-                json.dumps({"fflags": "+genpts+discardcorrupt"}),
-            )
             log.warning("retrying with genpts+discardcorrupt", extra={"job_id": str(row["id"])})
-            self.spawn(self.run_job(str(row["id"])))
+            await self._requeue(row, category=category, detail=detail,
+                                input_params={"fflags": "+genpts+discardcorrupt"})
             return
-        if (is_mux_error and current_params
-                and row["effective_profile"] != "repair"
+        if (is_mux_error and current_params and "aresample" not in json.dumps(prof_params)
                 and row["retries"] < self.cfg.job_retries + 2):
-            await self.db.execute(
-                "UPDATE jobs SET status = 'queued', retries = retries + 1, "
-                "encore_job_id = NULL, progress = 0, error_category = $2, "
-                "error_message = $3, effective_profile = 'repair', "
-                "input_params = $4::jsonb, updated_at = now() "
-                "WHERE id = $1 AND status IN ('queued','processing')",
-                row["id"], category, detail,
-                json.dumps({"fflags": "+genpts+discardcorrupt"}),
-            )
-            log.warning("retrying with repair profile", extra={"job_id": str(row["id"])})
-            self.spawn(self.run_job(str(row["id"])))
+            log.warning("retrying with async audio resample", extra={"job_id": str(row["id"])})
+            await self._requeue(row, category=category, detail=detail,
+                                profile_params={"repair": "aresample"})
             return
         if row["retries"] < self.cfg.job_retries and category in TRANSIENT_CATEGORIES:
-            await self.db.execute(
-                "UPDATE jobs SET status = 'queued', retries = retries + 1, "
-                "encore_job_id = NULL, progress = 0, error_category = $2, "
-                "error_message = $3, updated_at = now() "
-                "WHERE id = $1 AND status IN ('queued','processing')",
-                row["id"], category, detail,
-            )
-            self._edit_status(
-                row["requester_tg_id"], row["status_message_id"],
-                tr("status_retrying", await self._lang(row["requester_tg_id"]),
-                   attempt=row["retries"] + 1), force=True,
-            )
+            await self._requeue(row, category=category, detail=detail)
             for r in await self.db.fetch(
                 "SELECT chat_id, status_message_id, tg_id FROM job_requesters WHERE job_id = $1",
                 row["id"],
@@ -2078,49 +1522,47 @@ class JobEngine:
                     tr("status_retrying", await self._lang(r["tg_id"]),
                        attempt=row["retries"] + 1), force=True,
                 )
-            self.spawn(self.run_job(str(row["id"])))
         else:
             await self.fail_job(row, category, detail)
 
     async def retry_user_job(self, job_id: str, tg_id: int) -> tuple[bool, str]:
-        """User-facing bounded retry of a failed job (idempotent)."""
+        """User-facing bounded retry of a failed job (idempotent).
+
+        An upload failure whose encoded output still exists only re-uploads
+        (never re-encodes)."""
         row = await self.db.fetchrow("SELECT * FROM jobs WHERE id = $1", _as_uuid(job_id))
         if not row or row["status"] != "failed":
             return False, "not_failed"
         if row["requester_tg_id"] != tg_id and tg_id not in await self.admin_ids():
             return False, "not_allowed"
+        if (row["error_category"] or "") == "upload" and self._job_output_file(job_id):
+            ok = await self.resume_upload(job_id)
+            return (True, str(row["id"])[:8]) if ok else (False, "limit")
         if row["retries"] >= self.cfg.job_retries + 2:
             return False, "limit"
-        # Admission-lite (F2): a requeue must respect the same fairness caps as
-        # a fresh submission. Admins are exempt. The new reject reasons
-        # ("queue_full"/"user_busy") have no dedicated localized string yet, so
-        # both map to the existing generic "limit" reason - the button handler
-        # shows the same "retry_not_allowed" text for every False reason.
         if tg_id not in await self.admin_ids():
             queued = await self.db.fetchval("SELECT count(*) FROM jobs WHERE status = 'queued'")
             if int(queued or 0) >= self.cfg.max_queued:
                 return False, "limit"  # queue_full
             limits = await self.effective_limits(row["requester_tg_id"])
-            active = await self.db.fetchval(
+            pending = await self.db.fetchval(
                 "SELECT count(*) FROM jobs WHERE requester_tg_id = $1 "
                 "AND status IN ('queued','processing','deferred')",
                 row["requester_tg_id"],
             )
-            if int(active or 0) >= limits["max_active"]:
-                return False, "limit"  # user_busy
-        # Atomic claim (Argons claim-with-TTL pattern): the increment and the
-        # cap guard live in one conditional UPDATE so concurrent presses
-        # cannot race each other back to unlimited retries.
+            if int(pending or 0) >= limits["max_pending"]:
+                return False, "limit"  # user_pending
         claimed = await self.db.execute(
             "UPDATE jobs SET status='queued', encore_job_id=NULL, progress=0, "
             "error_category=NULL, error_message=NULL, updated_at=now(), stage='queued', "
+            "worker_id=NULL, lease_expires_at=NULL, completed_at=NULL, "
             "retries = retries + 1 "
             "WHERE id=$1 AND status='failed' AND retries < $2",
             row["id"], self.cfg.job_retries + 2,
         )
         if claimed == "UPDATE 0":
             return False, "limit"
-        self.spawn(self.run_job(str(row["id"])))
+        self.kick_dispatch()
         return True, str(row["id"])[:8]
 
     async def fail_job(self, row, category: str, detail: str) -> None:
@@ -2130,8 +1572,9 @@ class JobEngine:
         # Gate the counter on the actual state transition: concurrent
         # failure paths (callback + poller) used to double-count.
         failed = await self.db.fetchval(
-            "UPDATE jobs SET status = 'failed', stage = 'failed', reserved_bytes = 0, error_category = $2, "
-            "error_message = $3, completed_at = now(), updated_at = now() "
+            "UPDATE jobs SET status = 'failed', stage = 'failed', reserved_bytes = 0, "
+            "error_category = $2, error_message = $3, completed_at = now(), "
+            "worker_id = NULL, lease_expires_at = NULL, updated_at = now() "
             "WHERE id = $1 AND status IN ('queued','processing') RETURNING id",
             row["id"], category, detail,
         )
@@ -2140,10 +1583,12 @@ class JobEngine:
         await self.db.bump("jobs_failed")
         log.error("job failed",
                   extra={"job_id": str(row["id"]), "status": category, "detail": detail[:300]})
-        await self._cleanup_job_dirs(str(row["id"]), keep_output=False)
-        # job_requesters includes the requester, so this single loop reaches
-        # everyone - the requester used to get a second identical status_failed
-        # edit right after the loop (UX-04).
+        # An upload failure keeps its encoded output (retention window) so a
+        # retry uploads again instead of encoding again.
+        await self._cleanup_job_dirs(str(row["id"]), keep_output=(category == "upload"))
+        src = row["source_path"] if "source_path" in row.keys() else None
+        if category != "upload" and src:
+            await self._delete_botapi_path(src, None, exclude_job=str(row["id"]))
         for r in await self.db.fetch(
             "SELECT chat_id, status_message_id, tg_id FROM job_requesters WHERE job_id = $1",
             row["id"],
@@ -2154,18 +1599,26 @@ class JobEngine:
                 tr("status_failed", lang), markup=failure_markup(str(row["id"]), lang),
                 force=True,
             )
+        await self.update_log_record(str(row["id"]), "failed")
+        self.kick_dispatch()
 
-    async def _mark_cancelled(self, row) -> None:
+    async def _mark_cancelled(self, row, reason: str | None = None) -> None:
         cancelled = await self.db.fetchval(
             "UPDATE jobs SET status = 'cancelled', stage = 'cancelled', reserved_bytes = 0, "
-            "completed_at = now(), updated_at = now() "
+            "cancel_reason = COALESCE($2, cancel_reason), worker_id = NULL, "
+            "lease_expires_at = NULL, completed_at = now(), updated_at = now() "
             "WHERE id = $1 AND status IN ('queued','processing') RETURNING id",
-            row["id"],
+            row["id"], reason,
         )
         if not cancelled:
             return
         await self.db.bump("jobs_cancelled")
+        # Stop the in-process pipeline (download/probe/hash) of this job only.
+        self.stop_pipeline(str(row["id"]))
         await self._cleanup_job_dirs(str(row["id"]), keep_output=False)
+        src = row["source_path"] if "source_path" in row.keys() else None
+        if src:
+            await self._delete_botapi_path(src, None, exclude_job=str(row["id"]))
         for r in await self.db.fetch(
             "SELECT chat_id, status_message_id, tg_id FROM job_requesters WHERE job_id = $1",
             row["id"],
@@ -2173,45 +1626,68 @@ class JobEngine:
             self._edit_status(r["chat_id"], r["status_message_id"],
                               tr("status_cancelled", await self._lang(r["tg_id"])),
                               force=True)
+        await self.update_log_record(str(row["id"]), "cancelled")
+        self.kick_dispatch()
 
-    async def cancel_job(self, row, by_admin: bool = False) -> bool:
+    async def cancel_job(self, row, by_admin: bool = False, reason: str | None = None) -> bool:
+        """Cancel at every layer: DB state first (so no worker can claim or
+        resume it), then the in-process pipeline task, then Encore (which
+        terminates its FFmpeg process), then this job's files only."""
         if row["status"] not in ("queued", "processing"):
             return False
+        await self._mark_cancelled(row, reason or ("admin" if by_admin else "user"))
         if row["encore_job_id"]:
             try:
                 await self.encre.cancel_job(row["encore_job_id"])
             except EncoreError as exc:
                 log.warning("encore cancel failed",
                             extra={"job_id": str(row["id"]), "detail": str(exc)[:150]})
-        await self._mark_cancelled(row)
+            # Encore may still be flushing the output: sweep again shortly.
+            async def _late_sweep(jid=str(row["id"])):
+                await asyncio.sleep(30)
+                await self._cleanup_job_dirs(jid, keep_output=False)
+            self.spawn(_late_sweep())
         log.info("job cancelled",
-                 extra={"job_id": str(row["id"]), "detail": f"by_admin={by_admin}"})
+                 extra={"job_id": str(row["id"]), "detail": f"by_admin={by_admin} reason={reason}"})
         return True
 
     # ------------------------------------------------------------------
     # completion
     # ------------------------------------------------------------------
-    async def complete_job(self, row, encore_info: dict | None = None) -> None:
+    async def complete_job(self, row, encore_info: dict | None = None,
+                           resume: bool = False) -> None:
         job_id = str(row["id"])
         if row["status"] in ("completed", "failed", "cancelled"):
             return
+        if job_id in self._completing:
+            return  # this process is already completing it
+        self._completing.add(job_id)
+        try:
+            await self._complete_job_inner(row, encore_info, resume)
+        finally:
+            self._completing.discard(job_id)
+
+    async def _complete_job_inner(self, row, encore_info: dict | None,
+                                  resume: bool) -> None:
+        job_id = str(row["id"])
         # Atomic completion claim: the Encore completion callback and the
         # poller can both call reconcile for the same job; without this
         # claim, two concurrent _complete_split runs delete each other's
         # part files (observed: FileNotFoundError part001.mp4).
         claimed = await self.db.fetchval(
-            "UPDATE jobs SET stage='completing', updated_at=now() "
+            "UPDATE jobs SET stage='completing', updated_at=now(), "
+            "encode_done_at = COALESCE(encode_done_at, now()) "
             "WHERE id=$1 AND status IN ('queued','processing') "
-            "AND (coalesce(stage,'') <> 'completing' "
+            "AND (coalesce(stage,'') <> ALL($2::text[]) "
+            "     OR ($3 AND stage = 'upload_retry') "
             "     OR updated_at < now() - interval '10 minutes') RETURNING id",
-            row["id"],
+            row["id"], list(POST_ENCODE_STAGES), resume,
         )
         if claimed is None:
             return
-        lang = await self._lang(row["requester_tg_id"])
-        self._edit_status(row["requester_tg_id"], row["status_message_id"],
-                          tr("stage_archiving", lang), force=True)
         await self._set_stage(job_id, "validating")
+        self.kick_dispatch()  # encode slot is free: start the next download now
+        await self.push_stage_card(job_id)
 
         out_dir = Path(self.cfg.media_out) / job_id
         media_filename = await self._media_filename(row)
@@ -2224,6 +1700,10 @@ class JobEngine:
                 stem = stem[: -len(ext)].rstrip()
                 break
         final_name = (stem or "video") + ".mp4"
+        keys = set(row.keys())
+        if "output_name" in keys and row["output_name"]:
+            # The name the user chose at submission (normalized, always .mp4).
+            final_name = edu480.output_filename(row["output_name"], media_filename)
         # Accept both the encore "out*" name and a previously renamed output
         # (a crash between rename and completion must not lose the file).
         candidates = sorted(
@@ -2285,7 +1765,8 @@ class JobEngine:
                         extra={"job_id": job_id})
             return
         out_sha = await media_mod.sha256_file(output_path)
-        output_media_id = await self.db.fetchval(
+        prev_out = row["output_media_id"] if "output_media_id" in keys else None
+        output_media_id = prev_out or await self.db.fetchval(
             """
             INSERT INTO media_assets
                 (sha256, size_bytes, filename, duration_s, width, height, fps,
@@ -2299,6 +1780,12 @@ class JobEngine:
             out_probe.get("audio_channels"), out_probe.get("container"),
             out_probe.get("bitrate"), json.dumps(out_probe),
         )
+        if not prev_out:
+            await self.db.execute(
+                "UPDATE media_assets SET is_derivative = TRUE WHERE id = $1", output_media_id)
+            await self.db.execute(
+                "UPDATE jobs SET output_media_id = $2, output_size = $3 WHERE id = $1",
+                row["id"], output_media_id, output_size)
 
         # Remux results are container shifts, not size reductions - the
         # no-gain policy does not apply to them.
@@ -2394,7 +1881,7 @@ class JobEngine:
                 no_gain=no_gain, blocked=blocked, out_size=output_size,
                 out_probe=out_probe,
             )
-            await self._cleanup_job_dirs(job_id, keep_output=blocked, keep_source=no_gain)
+            await self._finish_delivery(row, keep_output=blocked, keep_source=no_gain)
             return
 
         # --- real archive upload ---
@@ -2404,17 +1891,20 @@ class JobEngine:
             log.warning("completion lease lost, standing down",
                         extra={"job_id": job_id})
             return
+        await self.db.execute(
+            "UPDATE jobs SET stage = 'uploading', upload_started_at = now() WHERE id = $1",
+            row["id"])
+        await self.push_stage_card(job_id)
         try:
             sent = await self._archive_upload(
                 path=output_path, caption=caption, thumbnail=thumbnail,
             )
-        except TelegramBadRequest as exc:
-            await self.fail_job(row, "archive",
-                                f"archive upload failed: {str(exc)[:200]}")
-            return
         except TelegramAPIError as exc:
-            await self.fail_job(row, "archive",
-                                f"archive upload failed: {str(exc)[:200]}")
+            # Delivery failure != encoding failure: keep the output and retry
+            # the upload alone (never a second encode).
+            fresh = await self.db.fetchrow("SELECT * FROM jobs WHERE id = $1", row["id"])
+            await self.schedule_upload_retry(fresh or row,
+                                             f"archive upload failed: {str(exc)[:200]}")
             return
         archive_msg_id = sent.message_id
         out_file_id = sent.video.file_id if sent.video else None
@@ -2487,7 +1977,22 @@ class JobEngine:
             row, archive_id, output_media_id, out_file_id,
             out_size=output_size, out_probe=out_probe,
         )
-        await self._cleanup_job_dirs(job_id, keep_output=False)
+        await self._finish_delivery(row)
+
+    async def _finish_delivery(self, row, keep_output: bool = False,
+                               keep_source: bool = False) -> None:
+        """Delivery done: timestamps, channel record, temp + source cleanup."""
+        job_id = str(row["id"])
+        await self.db.execute(
+            "UPDATE jobs SET delivered_at = now(), worker_id = NULL, "
+            "lease_expires_at = NULL WHERE id = $1", row["id"])
+        await self.update_log_record(job_id, "completed")
+        await self._cleanup_job_dirs(job_id, keep_output=keep_output,
+                                     keep_source=keep_source)
+        src = row["source_path"] if "source_path" in row.keys() else None
+        if src:
+            await self._delete_botapi_path(src, None, exclude_job=job_id)
+        self.kick_dispatch()
 
     async def _complete_split(
         self, row, output_path: Path, output_size: int, out_sha: str,
@@ -2556,13 +2061,11 @@ class JobEngine:
                 sent = await self._archive_upload(
                     path=part, caption=caption, thumbnail=thumbnail,
                 )
-            except TelegramBadRequest as exc:
-                await self.fail_job(row, "archive",
-                                    f"part {i + 1} upload failed: {str(exc)[:150]}")
-                return False
             except TelegramAPIError as exc:
-                await self.fail_job(row, "archive",
-                                    f"part {i + 1} upload failed: {str(exc)[:150]}")
+                # Already-archived parts are skipped on retry (idempotent).
+                fresh = await self.db.fetchrow("SELECT * FROM jobs WHERE id = $1", row["id"])
+                await self.schedule_upload_retry(
+                    fresh or row, f"part {i + 1} upload failed: {str(exc)[:150]}")
                 return False
             permalink = _permalink(self.state.archive_channel_id, sent.message_id)
             rec_id = await self.db.fetchval(
@@ -2603,7 +2106,7 @@ class JobEngine:
             out_size=output_size, out_probe=out_probe,
             part_ids=archive_ids, part_total=total,
         )
-        await self._cleanup_job_dirs(job_id, keep_output=False)
+        await self._finish_delivery(row)
         return True
 
     async def _archive_upload(self, *, path: Path, caption: str,
@@ -2613,6 +2116,20 @@ class JobEngine:
         exponential-backoff retry on transient errors (pattern: ArgonsEncoder
         UploadManager, reimplemented for Bot API)."""
         last_exc: Exception | None = None
+        if self.cfg.botapi_reads_media and str(path).startswith(self.cfg.media_root):
+            # Local Bot API reads the file straight from the shared /media
+            # mount: no multipart copy of a multi-GB body through the HTTP
+            # socket into the server's temp dir. Falls back to a normal
+            # upload if the server cannot see the path.
+            try:
+                async with self._upload_sem:
+                    return await self.bot.send_video(
+                        chat_id=self.state.archive_channel_id,
+                        video=f"file://{path}", caption=caption,
+                        supports_streaming=True, thumbnail=thumbnail)
+            except TelegramAPIError as exc:
+                log.warning("file:// upload failed, falling back to multipart",
+                            extra={"detail": media_mod.redact(str(exc))[:150]})
         for attempt in range(max_attempts):
             try:
                 async with self._upload_sem:
@@ -3172,14 +2689,19 @@ class JobEngine:
         await self.auto_resume_if_ok()
 
     async def recover_on_startup(self) -> None:
-        rows = await self.db.fetch(
-            "SELECT id, status, encore_job_id FROM jobs WHERE status IN ('queued','processing')"
-        )
-        for row in rows:
-            log.info("recovering job",
-                     extra={"job_id": str(row["id"]), "status": row["status"]})
-            if not row["encore_job_id"]:
-                self.spawn(self.run_job(str(row["id"])))
+        """Make the persistent queue consistent after a restart.
+
+        Queued jobs need nothing (the dispatcher picks them up). Jobs that
+        were mid-download/probe in the dead process go back to 'queued';
+        jobs already in Encore are reconciled by the poller; finished
+        encodes resume their upload from the existing output.
+        """
+        try:
+            await self.recover_queue_on_startup()
+        except Exception:  # noqa: BLE001 - recovery is best-effort
+            log.exception("queue recovery failed")
+        queued = await self.db.fetchval("SELECT count(*) FROM jobs WHERE status = 'queued'")
+        log.info("queue recovered", extra={"detail": f"queued={queued}"})
         # Merge sessions interrupted mid-run cannot be resumed safely (the
         # concat subprocess died with the process): mark them failed; the
         # staged inputs stay on disk for a new session if wanted.
@@ -3190,11 +2712,11 @@ class JobEngine:
         )
         if n and n != "UPDATE 0":
             log.warning("interrupted merge sessions failed", extra={"detail": n})
-        # Abandoned collecting sessions (no activity for a day) are cancelled.
         try:
             await merge_mod.fail_stale_sessions(self.db, stale_hours=24)
         except Exception:  # noqa: BLE001 - recovery is best-effort
             log.exception("merge stale-session cleanup failed")
+        self.kick_dispatch()
 
 
 def failure_markup(job_id: str, lang: str = "fa") -> InlineKeyboardMarkup:

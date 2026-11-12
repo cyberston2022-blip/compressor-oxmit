@@ -29,7 +29,9 @@ from datetime import datetime, timedelta, timezone
 from aiohttp import WSMsgType, web
 
 from . import audit as audit_mod
+from . import dashboard as dashboard_mod
 from . import media as media_mod
+from . import dashboard_page
 from .log import get_logger
 
 log = get_logger("oxmit.webpanel")
@@ -410,7 +412,7 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
 
     async def page(request: web.Request) -> web.Response:
         if _session(request):
-            return web.Response(text=_DASHBOARD_PAGE, content_type="text/html",
+            return web.Response(text=dashboard_page.PAGE, content_type="text/html",
                                 charset="utf-8")
         return web.Response(text=_LOGIN_PAGE, content_type="text/html",
                             charset="utf-8")
@@ -447,7 +449,10 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         sid = secrets.token_urlsafe(24)
         csrf = secrets.token_urlsafe(24)
         exp = int(time.time()) + COOKIE_TTL_S
-        sessions[sid] = {"exp": exp, "csrf": csrf, "actor": "panel-admin",
+        # The panel token is the server operator's secret -> owner role.
+        sessions[sid] = {"exp": exp, "csrf": csrf,
+                         "actor": f"owner:{cfg.owner_telegram_id or 'token'}",
+                         "role": "owner", "tg_id": cfg.owner_telegram_id or None,
                          "ip": ip, "created": int(time.time())}
         resp = _json({"ok": True})
         resp.set_cookie(COOKIE, f"{sid}:{exp}:{_sign(token, f'{sid}:{exp}')}",
@@ -477,9 +482,14 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         sid = secrets.token_urlsafe(24)
         csrf = secrets.token_urlsafe(24)
         exp = int(time.time()) + COOKIE_TTL_S
-        sessions[sid] = {"exp": exp, "csrf": csrf, "actor": "panel-admin",
+        # One-time links carry the minting admin's identity: the session
+        # gets that person's real role (owner/admin), not a shared login.
+        minted = int(entry["minted_by"])
+        role = "owner" if await engine.is_owner(minted) else "admin"
+        sessions[sid] = {"exp": exp, "csrf": csrf, "actor": f"{role}:{minted}",
+                         "role": role, "tg_id": minted,
                          "ip": ip, "created": int(time.time())}
-        await audit_mod.log_action(db, sessions[sid]["actor"], "admin",
+        await audit_mod.log_action(db, sessions[sid]["actor"], role,
                                    "panel.login", target=None,
                                    details="one-time link", source="web", ip=ip)
         await audit_mod.log_action(db, sessions[sid]["actor"], "admin",
@@ -665,6 +675,8 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
                                        tg_id, f"new={new}", "web", _ip(request))
             return _json({"ok": True, "new": new})
         if action == "admin":
+            if session.get("role") != "owner":
+                return _json({"error": "owner only"}, 403)
             try:
                 body = await request.json()
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -827,6 +839,15 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
     app.router.add_post("/panel/api/user/{tg_id}/{action}", user_action)
     app.router.add_post("/panel/api/system/{action}", system_action)
     app.router.add_get("/panel/ws", ws_handler)
+
+    async def legacy_page(request: web.Request) -> web.Response:
+        if not _session(request):
+            return web.Response(status=303, headers={"Location": "/panel"})
+        return web.Response(text=_DASHBOARD_PAGE, content_type="text/html", charset="utf-8")
+
+    app.router.add_get("/panel/legacy", legacy_page)
+    dashboard_mod.setup(app, engine, db, cfg, state, session_of=_session,
+                        post_session_of=_post_session, client_ip=_ip)
     log.info("panel v2 enabled at /panel (manage+audit; public site on :8081 "
              "via docker port 8090, internal app on :8080)")
 

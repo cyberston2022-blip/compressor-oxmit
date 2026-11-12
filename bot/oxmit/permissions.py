@@ -18,6 +18,9 @@ Feature keys (stable strings, add new ones without touching check sites):
     caption.use          personal caption configure + use
     merge.use            video merge
     merge_compress.use   merge + compress
+    forcesub.manage      mandatory channel membership settings (OWNER-ONLY by
+                         default; granted per admin by the Owner, never part
+                         of the default grants)
 """
 from __future__ import annotations
 
@@ -34,6 +37,7 @@ PERMS: tuple[str, ...] = (
     "caption.use",
     "merge.use",
     "merge_compress.use",
+    "forcesub.manage",
 )
 
 PERM_LABELS_FA = {
@@ -43,6 +47,7 @@ PERM_LABELS_FA = {
     "caption.use": "کپشن شخصی",
     "merge.use": "ادغام ویدیو",
     "merge_compress.use": "ادغام + فشرده‌سازی",
+    "forcesub.manage": "مدیریت عضویت اجباری",
 }
 
 PERM_LABELS_EN = {
@@ -52,6 +57,7 @@ PERM_LABELS_EN = {
     "caption.use": "Personal caption",
     "merge.use": "Video merge",
     "merge_compress.use": "Merge + compress",
+    "forcesub.manage": "Mandatory membership settings",
 }
 
 # Granted to every admin unless explicitly revoked (secure-but-usable base).

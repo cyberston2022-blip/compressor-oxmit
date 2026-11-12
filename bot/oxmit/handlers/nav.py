@@ -78,6 +78,11 @@ def build_router(engine, db, cfg, state) -> Router:
             [InlineKeyboardButton(text=tr("nav_btn_jobs", "fa"),
                                   callback_data="menu:jobs")],
         ]
+        # Glass-style "contact management" entry: the ONLY way a user
+        # message reaches the owner (see handlers/support.py).
+        if not owner:
+            kb.append([InlineKeyboardButton(text=tr("btn_contact", "fa"),
+                                            callback_data="sup:open")])
         if vip:
             kb.append([InlineKeyboardButton(text=tr("nav_btn_vip", "fa"),
                                             callback_data="menu:vip")])

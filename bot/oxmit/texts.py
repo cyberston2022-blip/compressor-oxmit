@@ -978,3 +978,218 @@ def reject_text(code: str, lang: str = "fa", **kw) -> str:
         except (KeyError, IndexError, ValueError):
             return text
     return text
+
+
+# ---------------------------------------------------------------------------
+# JIT queue / EDU480 / naming / support / moderation (migration 015)
+# ---------------------------------------------------------------------------
+T["reject"]["fa"].update({
+    "user_pending": "شما {max_pending} ویدیوی در انتظار دارید؛ بعد از پردازش آن‌ها دوباره ارسال کنید.",
+    "queue_full": "صف پردازش در حال حاضر کاملاً پر است ({cap} کار)؛ درخواست شما ثبت نشد. کمی بعد دوباره ارسال کنید.",
+    "blocked_user": "⛔️ دسترسی شما به ربات مسدود شده است.",
+})
+T["reject"]["en"].update({
+    "user_pending": "You already have {max_pending} videos waiting; send more after they finish.",
+    "queue_full": "The processing queue is completely full ({cap} jobs); your request was NOT accepted. Please try again later.",
+    "blocked_user": "⛔️ Your access to this bot is blocked.",
+})
+
+T.update({
+    "welcome2": {
+        "fa": (
+            "👋 سلام {name}!\n\n"
+            "🎓 ویدیوی آموزشی‌ات را بفرست (تا {max_gb} گیگابایت) تا با پروفایل "
+            "EDU480 فشرده شود: متن تخته و اسلایدها خوانا، صدا واضح، حجم بسیار کمتر.\n\n"
+            "۱) ویدیو را بفرست\n۲) نام دلخواه فایل خروجی را بنویس (فارسی یا انگلیسی، بدون پسوند)\n"
+            "۳) وضعیت صف و پیشرفت کار را زنده ببین"
+        ),
+        "en": (
+            "👋 Hi {name}!\n\n"
+            "🎓 Send your educational video (up to {max_gb} GB). It is compressed with "
+            "the EDU480 profile: readable boards/slides, clear audio, much smaller file.\n\n"
+            "1) Send the video\n2) Type the output file name (Persian or English, no extension)\n"
+            "3) Watch the live queue position and progress"
+        ),
+    },
+    "btn_contact": {"fa": "📨 ارتباط با مدیریت", "en": "📨 Contact management"},
+    "btn_myjobs": {"fa": "📋 کارهای من", "en": "📋 My jobs"},
+    "btn_menu": {"fa": "🧭 منو", "en": "🧭 Menu"},
+    "name_prompt": {
+        "fa": (
+            "✅ ویدیو دریافت شد\n"
+            "━━━━━━━━━━━━━━━\n"
+            "🎞 {src}\n📦 {size} | ⏱ {dur}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "✏️ نام فایل خروجی را بنویس (فارسی یا انگلیسی).\n"
+            "فقط نام؛ پسوند لازم نیست — خروجی همیشه MP4 است.\n"
+            "مثال: درس مهندسی برق ← درس مهندسی برق.mp4\n\n"
+            "⚠️ ویدیو هنوز دانلود نشده و تا نوبتش در صف دانلود نمی‌شود."
+        ),
+        "en": (
+            "✅ Video received\n"
+            "━━━━━━━━━━━━━━━\n"
+            "🎞 {src}\n📦 {size} | ⏱ {dur}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "✏️ Type the output file name (Persian or English).\n"
+            "Name only, no extension — the output is always MP4.\n"
+            "Example: University Lecture 01 → University Lecture 01.mp4\n\n"
+            "⚠️ The video is not downloaded yet; it is fetched only when its turn comes."
+        ),
+    },
+    "name_waiting_turn": {
+        "fa": "📥 ویدیوی «{src}» دریافت شد. اول نام ویدیوی قبلی را بنویس؛ بعد نام این یکی پرسیده می‌شود.",
+        "en": "📥 Received «{src}». Name the previous video first; this one is asked next.",
+    },
+    "btn_keep_name": {"fa": "📎 همان نام اصلی", "en": "📎 Keep original name"},
+    "btn_cancel_video": {"fa": "✖️ لغو این ویدیو", "en": "✖️ Cancel this video"},
+    "name_invalid": {
+        "fa": "❌ نام معتبر نیست. یک نام فارسی یا انگلیسی بنویس (حداکثر ۱۰۰ کاراکتر).",
+        "en": "❌ Invalid name. Type a Persian or English name (max 100 characters).",
+    },
+    "name_accepted": {"fa": "📝 نام خروجی: {name}", "en": "📝 Output name: {name}"},
+    "name_expired": {
+        "fa": "⌛️ زمان نام‌گذاری این ویدیو تمام شد. برای پردازش دوباره ارسالش کن.",
+        "en": "⌛️ Naming time for this video expired. Send it again to process it.",
+    },
+    "draft_cancelled": {"fa": "✖️ این ویدیو لغو شد.", "en": "✖️ This video was cancelled."},
+    "queue_card": {
+        "fa": (
+            "🎬 ویدیوی شما در صف ثبت شد\n"
+            "━━━━━━━━━━━━━━━\n"
+            "📝 {name}\n📦 {size} | ⏱ {dur}\n"
+            "🆔 {job}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "🟡 وضعیت: در انتظار پردازش\n"
+            "📌 جایگاه در صف: {pos}\n"
+            "⏳ کارهای جلوتر: {ahead}\n"
+            "⚙️ پردازشگرهای فعال: {busy}/{slots}\n"
+            "🕒 زمان تخمینی انتظار: {eta}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "ℹ️ ویدیوی اصلی هنوز دانلود نشده؛ وقتی نوبتش برسد دریافت می‌شود.\n"
+            "(زمان انتظار تخمین است، نه تضمین.)"
+        ),
+        "en": (
+            "🎬 Your video is in the queue\n"
+            "━━━━━━━━━━━━━━━\n"
+            "📝 {name}\n📦 {size} | ⏱ {dur}\n"
+            "🆔 {job}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "🟡 Status: waiting for a worker\n"
+            "📌 Queue position: {pos}\n"
+            "⏳ Jobs ahead: {ahead}\n"
+            "⚙️ Active workers: {busy}/{slots}\n"
+            "🕒 Estimated wait: {eta}\n"
+            "━━━━━━━━━━━━━━━\n"
+            "ℹ️ The original has not been downloaded yet; it is fetched when its turn comes.\n"
+            "(Waiting time is an estimate, not a guarantee.)"
+        ),
+    },
+    "stage_card": {
+        "fa": "{icon} {stage}\n━━━━━━━━━━━━━━━\n📝 {name}\n📦 {size} | ⏱ {dur}\n🆔 {job}\n━━━━━━━━━━━━━━━\n{body}",
+        "en": "{icon} {stage}\n━━━━━━━━━━━━━━━\n📝 {name}\n📦 {size} | ⏱ {dur}\n🆔 {job}\n━━━━━━━━━━━━━━━\n{body}",
+    },
+    "st_reserved": {"fa": "نوبت شما رسید — آماده‌سازی", "en": "Your turn — preparing"},
+    "st_downloading": {"fa": "در حال دریافت ویدیو از تلگرام", "en": "Downloading from Telegram"},
+    "st_probing": {"fa": "تحلیل جریان‌های تصویر و صدا", "en": "Analyzing video/audio streams"},
+    "st_checking": {"fa": "بررسی تکراری‌بودن و نیاز به فشرده‌سازی", "en": "Checking duplicates / need to compress"},
+    "st_encoding": {"fa": "فشرده‌سازی EDU480", "en": "Compressing (EDU480)"},
+    "st_validating": {"fa": "بررسی سلامت خروجی", "en": "Validating output"},
+    "st_uploading": {"fa": "ارسال فایل نهایی", "en": "Uploading result"},
+    "st_upload_retry": {"fa": "ارسال ناموفق بود؛ تلاش دوباره (بدون فشرده‌سازی مجدد)", "en": "Upload failed; retrying (no re-encode)"},
+    "card_dl_body": {
+        "fa": "⏱ زمان سپری‌شده: {elapsed}\n📥 حجم: {size}\n(سرور محلی تلگرام درصد دانلود را گزارش نمی‌کند؛ پس از پایان دانلود مرحله تغییر می‌کند.)",
+        "en": "⏱ Elapsed: {elapsed}\n📥 Size: {size}\n(The local Telegram server reports no download percentage; the stage changes when it completes.)",
+    },
+    "card_probe_body": {
+        "fa": "🖥 {res} | 🎞 {fps} fps | {vcodec}/{acodec}\n📶 {kbps} kbps\n🎯 پروفایل: EDU480 → {target}",
+        "en": "🖥 {res} | 🎞 {fps} fps | {vcodec}/{acodec}\n📶 {kbps} kbps\n🎯 Profile: EDU480 → {target}",
+    },
+    "card_enc_body": {
+        "fa": "[{bar}] {pct}%\n⚡️ سرعت: {speed}\n⏱ سپری‌شده: {elapsed}{eta}\n🎯 EDU480 → {target}",
+        "en": "[{bar}] {pct}%\n⚡️ Speed: {speed}\n⏱ Elapsed: {elapsed}{eta}\n🎯 EDU480 → {target}",
+    },
+    "card_eta_suffix": {"fa": "\n⌛️ باقی‌مانده (تخمین): {eta}", "en": "\n⌛️ Remaining (estimate): {eta}"},
+    "card_up_body": {
+        "fa": "☁️ حجم خروجی: {out}\n⏱ سپری‌شده: {elapsed}",
+        "en": "☁️ Output size: {out}\n⏱ Elapsed: {elapsed}",
+    },
+    "remux_note": {
+        "fa": "ℹ️ این ویدیو از قبل با استاندارد EDU480 سازگار بود؛ بدون فشرده‌سازی مجدد تحویل شد.",
+        "en": "ℹ️ This video already met the EDU480 standard; delivered without re-encoding.",
+    },
+    "known_output": {
+        "fa": "♻️ این فایل قبلاً توسط همین ربات فشرده شده است؛ نسخهٔ موجود بدون پردازش دوباره ارسال شد.",
+        "en": "♻️ This file was already compressed by this bot; the existing result was sent without reprocessing.",
+    },
+    # ---- support / contact management ----
+    "sup_open": {
+        "fa": (
+            "📨 ارتباط با مدیریت\n━━━━━━━━━━━━━━━\n"
+            "پیامت را همین حالا بنویس (متن، عکس، ویس یا فایل).\n"
+            "فقط مدیر ارشد آن را می‌بیند و پاسخ از طریق همین ربات برایت ارسال می‌شود.\n\n"
+            "⏳ این گفتگو تا {mins} دقیقه باز است."
+        ),
+        "en": (
+            "📨 Contact management\n━━━━━━━━━━━━━━━\n"
+            "Write your message now (text, photo, voice or file).\n"
+            "Only the owner sees it; the reply arrives through this bot.\n\n"
+            "⏳ This conversation stays open for {mins} minutes."
+        ),
+    },
+    "sup_sent": {"fa": "✅ پیامت به مدیریت تحویل شد. پاسخ از طریق همین ربات می‌رسد.",
+                 "en": "✅ Your message was delivered to management. The reply will arrive here."},
+    "sup_cancelled": {"fa": "✖️ ارتباط با مدیریت لغو شد.", "en": "✖️ Contact cancelled."},
+    "sup_failed": {"fa": "❌ ارسال پیام ممکن نشد؛ کمی بعد تلاش کنید.",
+                   "en": "❌ Could not deliver the message; try again later."},
+    "sup_is_owner": {"fa": "👑 شما مدیر ارشد هستید؛ پیام‌های کاربران برای شما ارسال می‌شود.",
+                     "en": "👑 You are the owner; user messages are delivered to you."},
+    "sup_no_owner": {"fa": "مدیریت هنوز تنظیم نشده است.", "en": "Management is not configured yet."},
+    "sup_rate": {"fa": "⏳ پیام‌های زیادی فرستادی؛ کمی بعد دوباره امتحان کن.",
+                 "en": "⏳ Too many messages; please try again later."},
+    "sup_owner_header": {
+        "fa": "📨 پیام پشتیبانی #{mid}\n👤 {name} {uname}\n🆔 {uid}\n🕒 {ts}",
+        "en": "📨 Support message #{mid}\n👤 {name} {uname}\n🆔 {uid}\n🕒 {ts}",
+    },
+    "sup_btn_reply": {"fa": "↩️ پاسخ", "en": "↩️ Reply"},
+    "sup_reply_prompt": {
+        "fa": "✍️ پاسخ به {name} ({uid}) را بنویس. (برای لغو: /cancel)",
+        "en": "✍️ Write your reply to {name} ({uid}). (/cancel to abort)",
+    },
+    "sup_reply_sent": {"fa": "✅ پاسخ برای {uid} ارسال شد.", "en": "✅ Reply sent to {uid}."},
+    "sup_reply_failed": {"fa": "❌ ارسال پاسخ ناموفق بود (کاربر ربات را مسدود کرده؟).",
+                         "en": "❌ Reply failed (user may have blocked the bot)."},
+    "sup_reply_header": {"fa": "💬 پاسخ مدیریت:", "en": "💬 Reply from management:"},
+    # ---- channel log / moderation ----
+    "log_record": {
+        "fa": (
+            "🎬 درخواست فشرده‌سازی\n"
+            "👤 {name} {uname}\n🆔 کاربر: {uid}\n"
+            "🧾 کار: {job}\n"
+            "📁 فایل اصلی: {src}\n📝 نام خروجی: {out}\n"
+            "📦 {size} | ⏱ {dur}\n"
+            "🕒 ثبت: {ts}\n"
+            "⚙️ پروفایل: EDU480\n"
+            "📍 وضعیت: {status}"
+        ),
+        "en": (
+            "🎬 Compression request\n"
+            "👤 {name} {uname}\n🆔 User: {uid}\n"
+            "🧾 Job: {job}\n"
+            "📁 Source: {src}\n📝 Output: {out}\n"
+            "📦 {size} | ⏱ {dur}\n"
+            "🕒 Submitted: {ts}\n"
+            "⚙️ Profile: EDU480\n"
+            "📍 Status: {status}"
+        ),
+    },
+    "mod_btn_remove_ban": {"fa": "🗑 حذف ویدیو و مسدودسازی کاربر", "en": "🗑 Remove video & ban user"},
+    "mod_btn_confirm": {"fa": "⚠️ تأیید حذف و بن", "en": "⚠️ Confirm remove & ban"},
+    "mod_btn_abort": {"fa": "انصراف", "en": "Abort"},
+    "mod_only_owner": {"fa": "فقط مالک ربات می‌تواند این کار را انجام دهد.", "en": "Only the owner can do this."},
+    "mod_done": {"fa": "✅ ویدیو حذف و کاربر مسدود شد.", "en": "✅ Video removed and user banned."},
+    "mod_already": {"fa": "این مورد قبلاً اعمال شده است.", "en": "Already applied."},
+    "mod_user_notice": {
+        "fa": "⛔️ درخواست شما به دلیل نقض قوانین حذف شد و دسترسی شما مسدود است.",
+        "en": "⛔️ Your request was removed for violating the rules and your access is blocked.",
+    },
+})

@@ -187,7 +187,8 @@ def build_router(engine, db, cfg, state) -> Router:
                  "watermark.use": tr("own_mx_wm", "fa"),
                  "caption.use": tr("own_mx_cap", "fa"),
                  "merge.use": tr("own_mx_merge", "fa"),
-                 "merge_compress.use": tr("own_mx_mergc", "fa")}
+                 "merge_compress.use": tr("own_mx_mergc", "fa"),
+                 "forcesub.manage": "🔒"}
         for aid in admins:
             pmap = await perms.effective_perms(engine, aid)
             row = await _user_row(aid)

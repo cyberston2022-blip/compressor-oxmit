@@ -16,14 +16,14 @@ from .db import Database
 from .encore_client import EncoreClient
 from .engine import JobEngine
 from .handlers import admin, adminpanel, intake, menu, settings
-from .handlers import merge_flow, nav, owner, personal
+from .handlers import merge_flow, moderation, nav, owner, personal, support
 from .internal_api import start_internal_api
 from .log import get_logger, setup_logging
 from .resources import WorkerCpuTuner
 
 log = get_logger("oxmit.bot")
 
-USER_COMMANDS = [
+USER_COMMANDS = [  # informational; refresh_admin_commands sets the real menus
     ("start", "شروع / Start"),
     ("settings", "⚙️ تنظیمات / Settings"),
 ]
@@ -140,8 +140,14 @@ async def main() -> None:
     # The branding hub opens the personal editors via pr:* callbacks, so the
     # nav router gets a bridge to the personal router's preview renderer.
     nav_router.bind_personal_router(personal_router)  # type: ignore[attr-defined]
+    support_router = support.build_router(engine, db, cfg, state)
     dp = Dispatcher()
     dp.include_router(menu.build_router(engine, db, cfg, state))
+    # Support BEFORE every other message consumer: an explicitly opened
+    # contact session / an owner reply must not be swallowed by intake or
+    # pending-input handlers; its filters only match those explicit states.
+    dp.include_router(support_router)
+    dp.include_router(moderation.build_router(engine, db, cfg, state))
     dp.include_router(settings.build_router(engine, db, cfg, state))
     dp.include_router(nav_router)
     dp.include_router(owner.build_router(engine, db, cfg, state))
@@ -165,7 +171,7 @@ async def main() -> None:
     background = [
         asyncio.create_task(poller_loop(engine, cpu_tuner, cfg)),
         asyncio.create_task(sweep_loop(engine, intake_router, adminpanel_router,
-                                       merge_router, nav_router)),
+                                       merge_router, nav_router, support_router)),
         asyncio.create_task(engine.fingerprinter.run()),
     ]
 

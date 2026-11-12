@@ -1,7 +1,7 @@
 """Unit tests: admission control reject codes and admin bypass."""
 import pytest
 
-from oxmit.engine import AdmissionDeferred, AdmissionError
+from oxmit.engine import AdmissionError
 
 GB = 1024 ** 3
 
@@ -71,9 +71,10 @@ async def test_queue_full_rejected(engine, fake_db):
     assert exc.value.code == "queue_full"
 
 
-async def test_disk_deferral(engine, fake_db, monkeypatch):
+async def test_low_disk_does_not_reject_intake(engine, fake_db):
+    """A queued job is a DB row, not a file: low disk must not reject or
+    defer intake (the dispatcher holds downloads until space frees)."""
     engine.state.archive_channel_id = -100123
-    engine.cfg.disk_defer = True
     engine._disk_free = lambda: 1 << 30  # 1 GB "free"
     fake_db.on_fetchrow(lambda sql: "FROM users" in sql, _users_row())
     fake_db.on_fetchval(lambda sql: "status IN ('queued','processing','deferred')" in sql, 0)
@@ -81,9 +82,22 @@ async def test_disk_deferral(engine, fake_db, monkeypatch):
     fake_db.on_fetchval(lambda sql: "interval '24 hours'" in sql and "sum" not in sql, 0)
     fake_db.on_fetchval(lambda sql: "sum(source_size)" in sql, 0)
     fake_db.on_fetchval(lambda sql: "status = 'queued'" in sql, 0)
-    fake_db.on_fetchval(lambda sql: "sum(reserved_bytes)" in sql, 0)
-    with pytest.raises(AdmissionDeferred):
+    await engine.check_admission(1, 3 << 30)  # must not raise
+
+
+async def test_pending_cap_rejects_with_clear_code(engine, fake_db):
+    engine.state.archive_channel_id = -100123
+    fake_db.on_fetchrow(lambda sql: "FROM users" in sql, _users_row())
+    fake_db.on_fetchval(lambda sql: "status IN ('queued','processing','deferred')" in sql, 10)
+    fake_db.on_fetchval(lambda sql: "status = 'queued'" in sql, 0)
+    with pytest.raises(AdmissionError) as exc:
         await engine.check_admission(1, 100 << 20)
+    assert exc.value.code == "user_pending" and exc.value.fmt["max_pending"] == 10
+
+
+def test_queue_capacity_default_is_5000():
+    from oxmit.config import Settings
+    assert Settings().max_queued == 5000
 
 
 async def test_duration_limit(engine, fake_db):

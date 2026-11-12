@@ -80,7 +80,7 @@ async def deliver_result(
 ) -> tuple[bool, str, int | None]:
     """Deliver a result to a chat. Never raises on Telegram errors.
 
-    Order: forward from archive -> copy from archive -> send by file_id ->
+    Order: copy from archive (no forward attribution) -> send by file_id ->
     upload local file. as_document sends the file as an attachment instead
     of a streamable video when a direct file id/path is available. thumbnail
     (an FSInputFile) only applies to the fresh local-upload branch - Telegram
@@ -89,34 +89,23 @@ async def deliver_result(
     """
     bot = engine.bot
     if archive_message_id and archive_channel_id and not as_document:
+        # copy_message, never forward_message: a copy carries no
+        # "forwarded from <private channel>" header, so the storage channel
+        # is never exposed to users, and the file itself is not re-uploaded.
         try:
-            msg = await flood_safe(lambda: bot.forward_message(
+            msg = await flood_safe(lambda: bot.copy_message(
                 chat_id=chat_id,
                 from_chat_id=archive_channel_id,
                 message_id=archive_message_id,
+                caption=caption,
             ))
-            return True, "forward", msg.message_id
+            return True, "copy", msg.message_id
         except (TelegramBadRequest, TelegramForbiddenError, TelegramAPIError) as exc:
             if _is_not_found(exc):
-                log.warning("archive message gone", extra={"detail": str(exc)[:150]})
-                archive_message_id = 0  # skip further archive-based attempts
+                log.warning("archive message gone (copy)", extra={"detail": str(exc)[:150]})
             else:
-                log.info("forward failed, trying copy", extra={"detail": str(exc)[:150]})
-        if archive_message_id:
-            try:
-                msg = await flood_safe(lambda: bot.copy_message(
-                    chat_id=chat_id,
-                    from_chat_id=archive_channel_id,
-                    message_id=archive_message_id,
-                    caption=caption,
-                ))
-                return True, "copy", msg.message_id
-            except (TelegramBadRequest, TelegramForbiddenError, TelegramAPIError) as exc:
-                if _is_not_found(exc):
-                    log.warning("archive message gone (copy)", extra={"detail": str(exc)[:150]})
-                else:
-                    log.info("copy failed, trying file_id/local",
-                             extra={"detail": str(exc)[:150]})
+                log.info("copy failed, trying file_id/local",
+                         extra={"detail": str(exc)[:150]})
     if file_id:
         try:
             if as_document:

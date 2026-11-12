@@ -23,6 +23,7 @@ from aiogram.types import (
 
 from .. import audit as audit_mod
 from .. import forcesub
+from .. import permissions as perms
 from .. import media as media_mod
 from ..log import get_logger
 from ..media import human_size
@@ -36,7 +37,8 @@ _LIMIT_META = {
     "max_source_gb": ("📦 سقف حجم ورودی", "GB", 1, 1, 20),
     "max_duration_min": ("⏱ حداکثر مدت", "دقیقه", 30, 30, 1440),
     "daily_quota_gb": ("📅 سهمیهٔ روزانه", "GB", 1, 1, 200),
-    "max_active": ("🔄 کار همزمان", "", 1, 1, 10),
+    "max_active": ("🔄 پردازش همزمان", "", 1, 1, 10),
+    "max_pending": ("📥 حداکثر در صف", "", 1, 1, 200),
     "max_per_hour": ("⚡ سقف ساعتی", "", 5, 5, 120),
 }
 _ULIM_META = {
@@ -229,8 +231,8 @@ def build_router(engine, db, cfg, state) -> Router:
     # ------------------------------------------------------------------
     # panel entry
     # ------------------------------------------------------------------
-    def panel_keyboard() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[
+    def panel_keyboard(show_fsub: bool = False) -> InlineKeyboardMarkup:
+        rows = [
             [InlineKeyboardButton(text="📊 آمار", callback_data="adm:stats"),
              InlineKeyboardButton(text="🩺 سلامت", callback_data="adm:health")],
             [InlineKeyboardButton(text="⏸/▶️ پذیرش", callback_data="adm:pause"),
@@ -243,8 +245,17 @@ def build_router(engine, db, cfg, state) -> Router:
              InlineKeyboardButton(text="🎚 محدودیت‌ها", callback_data="adm:limits")],
             [InlineKeyboardButton(text="📢 اطلاع‌رسانی", callback_data="adm:broadcast"),
              InlineKeyboardButton(text="🚫 بن", callback_data="adm:ban")],
-            [InlineKeyboardButton(text="🔒 عضویت اجباری", callback_data="adm:fsub")],
-        ])
+        ]
+        # Mandatory-membership settings are owner-only unless the Owner
+        # granted forcesub.manage (default deny). Hiding is UX only - every
+        # fsub callback/text handler re-checks the permission below.
+        if show_fsub:
+            rows.append([InlineKeyboardButton(text="🔒 عضویت اجباری",
+                                              callback_data="adm:fsub")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _can_fsub(uid: int) -> bool:
+        return await perms.has_perm(engine, uid, "forcesub.manage")
 
     @router.message(F.text.startswith("/admin"))
     async def on_admin(message: Message):
@@ -256,7 +267,7 @@ def build_router(engine, db, cfg, state) -> Router:
         pending_mode.pop(message.from_user.id, None)  # /admin cancels pending flows
         await message.answer(
             tr("admin_panel_title", "fa"),
-            reply_markup=panel_keyboard(),
+            reply_markup=panel_keyboard(await _can_fsub(message.from_user.id)),
         )
 
     async def _guard(callback: CallbackQuery) -> bool:
@@ -289,7 +300,8 @@ def build_router(engine, db, cfg, state) -> Router:
         if action == "menu":
             try:
                 await callback.message.edit_text(
-                    tr("admin_panel_title", "fa"), reply_markup=panel_keyboard())
+                    tr("admin_panel_title", "fa"),
+                    reply_markup=panel_keyboard(await _can_fsub(callback.from_user.id)))
             except Exception:  # noqa: BLE001
                 pass
 
@@ -430,6 +442,11 @@ def build_router(engine, db, cfg, state) -> Router:
                 tr("admin_broadcast_prompt", "fa"), reply_markup=_cancel_kb())
 
         elif action == "fsub":
+            if not await _can_fsub(callback.from_user.id):
+                # (the callback was already answered above)
+                await callback.message.answer(tr("perm_denied", "fa",
+                                                 perm=perms.PERM_LABELS_FA["forcesub.manage"]))
+                return
             conf = await forcesub.current(db)
             state_txt = (f"فعال روی {conf['channel_id']}" if conf["enabled"]
                          else "غیرفعال")
@@ -961,6 +978,12 @@ def build_router(engine, db, cfg, state) -> Router:
     @router.message(F.text, _has_pending("fsub"))
     async def on_admin_fsub_text(message: Message):
         pending_mode.pop(message.from_user.id, None)
+        # Re-check at the mutation point: a revoked grant must stop an
+        # input that was started while the admin still had it.
+        if not await _can_fsub(message.from_user.id):
+            await message.answer(tr("perm_denied", "fa",
+                                    perm=perms.PERM_LABELS_FA["forcesub.manage"]))
+            return
         raw = (message.text or "").strip()
         if raw.lower() in ("off", "خاموش", "حذف"):
             await db.set_config("force_sub", {"enabled": False})
