@@ -1359,33 +1359,182 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
 
 _LOGIN_PAGE = """<!doctype html><html dir="rtl" lang="fa"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Oxmit Panel — ورود</title>
+<title>Oxmit Super-Admin — ورود به پنل مدیریت</title>
 <style>
-body{font-family:Vazirmatn,Tahoma,sans-serif;background:#f4f5f9;display:flex;
-align-items:center;justify-content:center;min-height:100vh;margin:0;color:#1f232b}
-.card{background:#fff;border-radius:18px;padding:36px;box-shadow:0 10px 40px rgba(20,24,40,.12);
-width:330px;text-align:center}
-.logo{width:52px;height:52px;border-radius:15px;background:linear-gradient(135deg,#ff7a45,#e8562a);
-color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:22px;margin:0 auto 14px}
-h1{font-size:19px;margin:0 0 4px}
-p{color:#8b90a0;font-size:12.5px;margin:0 0 18px}
-input{width:100%;box-sizing:border-box;padding:11px;border:1px solid #e3e6ee;border-radius:12px;
-margin-bottom:12px;font-size:14px;outline:none}
-input:focus{border-color:#e8562a}
-button{width:100%;padding:11px;border:0;border-radius:12px;background:linear-gradient(135deg,#ff7a45,#e8562a);
-color:#fff;font-size:15px;font-weight:700;cursor:pointer;font-family:inherit}
-button:hover{filter:brightness(1.05)}
-.err{color:#c0392b;font-size:13px;min-height:18px;margin-top:8px}
-</style></head><body><div class="card">
-<div class="logo">O</div><h1>Oxmit Admin</h1><p>پنل مدیریت — نسخه ۲</p>
-<input id="t" type="password" placeholder="توکن پنل" autofocus>
-<button onclick="go()">ورود</button><div class="err" id="e"></div></div>
-<script>async function go(){const e=document.getElementById('e');e.textContent='';
-try{const r=await fetch('/panel/login',{method:'POST',
-headers:{'Content-Type':'application/json'},body:JSON.stringify({token:document.getElementById('t').value})});
-if(r.ok){location.reload()}
-else if(r.status===429){const j=await r.json();e.textContent='قفل موقت — '+Math.ceil(j.retry_after||60)+' ثانیه دیگر تلاش کنید'}
-else{e.textContent='توکن اشتباه است'}}catch(x){e.textContent='خطای ارتباط'}}</script>
+:root {
+  --bg: #090c13;
+  --card: #121622;
+  --border: #22293a;
+  --ink: #f0f3fa;
+  --ink-mut: #8b95aa;
+  --acc: #e8562a;
+  --acc-glow: rgba(232, 86, 42, 0.28);
+  --acc-gradient: linear-gradient(135deg, #ff7a45, #e8562a);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: Vazirmatn, "Segoe UI", Tahoma, system-ui, sans-serif;
+  background: var(--bg);
+  background-image: radial-gradient(circle at 50% 20%, rgba(232, 86, 42, 0.08), transparent 45%),
+                    radial-gradient(circle at 80% 80%, rgba(59, 130, 246, 0.04), transparent 40%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  color: var(--ink);
+  padding: 20px;
+}
+.login-card {
+  background: rgba(18, 22, 34, 0.85);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 40px 32px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5), 0 0 30px var(--acc-glow);
+  width: min(390px, 100%);
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+.login-card::before {
+  content: "";
+  position: absolute;
+  top: 0; right: 0; left: 0;
+  height: 3px;
+  background: var(--acc-gradient);
+}
+.logo-box {
+  width: 58px;
+  height: 58px;
+  border-radius: 16px;
+  background: var(--acc-gradient);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 900;
+  font-size: 26px;
+  margin: 0 auto 16px;
+  box-shadow: 0 4px 20px var(--acc-glow);
+}
+h1 {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: -0.3px;
+  margin-bottom: 4px;
+}
+p.sub {
+  color: var(--ink-mut);
+  font-size: 12px;
+  margin-bottom: 24px;
+}
+.badge-role {
+  display: inline-block;
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 99px;
+  background: rgba(232, 86, 42, 0.12);
+  border: 1px solid rgba(232, 86, 42, 0.3);
+  color: #ff8555;
+  margin-bottom: 20px;
+  font-weight: 600;
+}
+input {
+  width: 100%;
+  padding: 12px 14px;
+  background: #171c2b;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--ink);
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  margin-bottom: 14px;
+  transition: all 0.2s;
+  text-align: center;
+}
+input:focus {
+  border-color: var(--acc);
+  box-shadow: 0 0 12px var(--acc-glow);
+}
+button {
+  width: 100%;
+  padding: 12px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--acc-gradient);
+  color: #fff;
+  font-size: 14.5px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  box-shadow: 0 4px 16px var(--acc-glow);
+  transition: all 0.18s ease;
+}
+button:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+}
+.err {
+  color: #f87171;
+  font-size: 12.5px;
+  min-height: 20px;
+  margin-top: 12px;
+}
+.hint {
+  font-size: 11px;
+  color: var(--ink-mut);
+  margin-top: 18px;
+  line-height: 1.6;
+}
+</style>
+</head>
+<body>
+<div class="login-card">
+  <div class="logo-box">O</div>
+  <h1>مرکز مدیریت Oxmit</h1>
+  <p class="sub">Super-Admin Control Suite v3.2</p>
+  <div class="badge-role">👑 ورود انحصاری مالک (@Oxmit)</div>
+
+  <input id="t" type="password" placeholder="توکن امنیتی پنل را وارد کنید..." autofocus>
+  <button id="btn" onclick="go()">ورود به پنل</button>
+  <div class="err" id="e"></div>
+
+  <div class="hint">
+    💡 نکته: می‌توانید از طریق دستور <code>/panel</code> داخل ربات تلگرام با لینک یک‌بارمصرف بدون نیاز به توکن وارد شوید.
+  </div>
+</div>
+<script>
+async function go(){
+  const e=document.getElementById('e');
+  const btn=document.getElementById('btn');
+  e.textContent='';
+  const val = document.getElementById('t').value.trim();
+  if(!val){e.textContent='لطفاً توکن را وارد کنید'; return;}
+  btn.disabled = true;
+  btn.textContent = 'در حال بررسی...';
+  try{
+    const r=await fetch('/panel/login',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token:val})
+    });
+    if(r.ok){location.reload()}
+    else if(r.status===429){
+      const j=await r.json();
+      e.textContent='قفل موقت امنیتی — '+Math.ceil(j.retry_after||60)+' ثانیه دیگر تلاش کنید';
+    }else{
+      e.textContent='توکن وارد شده نامعتبر است';
+    }
+  }catch(x){
+    e.textContent='خطای ارتباط با سرور';
+  }finally{
+    btn.disabled = false;
+    btn.textContent = 'ورود به پنل';
+  }
+}
+document.getElementById('t').onkeydown = e => { if(e.key === 'Enter') go(); };
+</script>
 </body></html>"""
 
 
