@@ -21,6 +21,7 @@ from . import edu480
 from . import media as media_mod
 from .jobqueue import SLOT_STAGES
 from .log import get_logger
+from .panel.security import require_owner, OWNER_TELEGRAM_ID
 
 log = get_logger("oxmit.dashboard")
 
@@ -65,42 +66,54 @@ def _secs(a, b):
 
 
 def job_dict(r) -> dict:
-    keys = set(r.keys())
-    queued = r["status"] == "queued"
-    wait_end = r["reserved_at"] if r["reserved_at"] else (None if queued else r["completed_at"])
+    keys = set(r.keys()) if hasattr(r, "keys") else set()
+    status = r.get("status", "queued")
+    queued = status == "queued"
+    reserved_at = r.get("reserved_at")
+    completed_at = r.get("completed_at")
+    wait_end = reserved_at if reserved_at else (None if queued else completed_at)
+    jid_str = str(r.get("id") or "")
+    profile_str = str(r.get("profile") or "edu480")
+    profile_ver = r.get("profile_version", 1)
+    source_fn = r.get("source_filename") or r.get("fname")
+    out_fn = r.get("output_name")
+
     return {
-        "id": r["id"], "jid": r["id"][:8], "status": r["status"], "stage": r["stage"],
-        "profile": f"{r['profile']} v{r['profile_version']}",
-        "priority": r["priority"], "progress": r["progress"] or 0,
-        "retries": r["retries"], "upload_attempts": r["upload_attempts"],
-        "position": r["pos"] if "pos" in keys else None,
-        "ahead": (r["pos"] - 1) if "pos" in keys and r["pos"] else None,
-        "user": {"id": r["tg"], "name": r["first_name"], "username": r["username"],
-                 "banned": bool(r["is_blocked"]), "vip": bool(r["is_vip"])},
+        "id": jid_str, "jid": jid_str[:8], "status": status, "stage": r.get("stage"),
+        "profile": f"{profile_str} v{profile_ver}",
+        "priority": r.get("priority", 50), "progress": r.get("progress") or 0,
+        "retries": r.get("retries", 0), "upload_attempts": r.get("upload_attempts", 0),
+        "position": r.get("pos") if "pos" in keys else None,
+        "ahead": (r["pos"] - 1) if "pos" in keys and r.get("pos") else None,
+        "user": {"id": r.get("tg") or r.get("requester_tg_id"),
+                 "name": r.get("first_name"),
+                 "username": r.get("username"),
+                 "banned": bool(r.get("is_blocked")),
+                 "vip": bool(r.get("is_vip"))},
         "video": {
-            "source_name": r["source_filename"],
-            "output_name": edu480.output_filename(r["output_name"], r["source_filename"]),
-            "size": int(r["source_size"] or 0),
-            "output_size": int(r["output_size"]) if r["output_size"] is not None else None,
-            "duration_s": float(r["duration_s"] or 0) or None,
-            "resolution": f"{r['width']}×{r['height']}" if r["width"] else None,
-            "vcodec": r["vcodec"], "acodec": r["acodec"],
-            "fps": float(r["fps"]) if r["fps"] else None,
-            "bitrate": int(r["bitrate"]) if r["bitrate"] else None,
+            "source_name": source_fn,
+            "output_name": edu480.output_filename(out_fn, source_fn) if source_fn else out_fn,
+            "size": int(r.get("source_size") or 0),
+            "output_size": int(r["output_size"]) if r.get("output_size") is not None else None,
+            "duration_s": float(r.get("duration_s") or 0) or None,
+            "resolution": f"{r['width']}×{r['height']}" if r.get("width") else None,
+            "vcodec": r.get("vcodec"), "acodec": r.get("acodec"),
+            "fps": float(r["fps"]) if r.get("fps") else None,
+            "bitrate": int(r["bitrate"]) if r.get("bitrate") else None,
         },
-        "ts": {k: _iso(r[k]) for k in (
+        "ts": {k: _iso(r.get(k)) for k in (
             "enqueued_at", "reserved_at", "download_started_at", "download_done_at",
             "encode_started_at", "encode_done_at", "upload_started_at", "delivered_at",
             "completed_at")},
-        "wait_s": _secs(r["enqueued_at"], wait_end),
-        "processing_s": (_secs(r["reserved_at"], r["delivered_at"] or r["completed_at"])
-                         if r["reserved_at"] else None),
-        "encode_s": (_secs(r["encode_started_at"], r["encode_done_at"])
-                     if r["encode_started_at"] else None),
-        "worker": r["worker_id"], "reused": bool(r["reused"]),
-        "decision": r["decision"], "cancel_reason": r["cancel_reason"],
-        "error": ({"category": r["error_category"], "message": media_mod.redact(r["err"])}
-                  if r["error_category"] or r["err"] else None),
+        "wait_s": _secs(r.get("enqueued_at"), wait_end),
+        "processing_s": (_secs(reserved_at, r.get("delivered_at") or completed_at)
+                         if reserved_at else None),
+        "encode_s": (_secs(r.get("encode_started_at"), r.get("encode_done_at"))
+                     if r.get("encode_started_at") else None),
+        "worker": r.get("worker_id"), "reused": bool(r.get("reused")),
+        "decision": r.get("decision"), "cancel_reason": r.get("cancel_reason"),
+        "error": ({"category": r.get("error_category"), "message": media_mod.redact(r.get("err"))}
+                  if r.get("error_category") or r.get("err") else None),
     }
 
 
@@ -343,15 +356,10 @@ def setup(app: web.Application, engine, db, cfg, state, *, session_of, post_sess
         return web.json_response(data, status=status)
 
     def _auth(handler):
-        async def wrapped(request: web.Request):
-            session = session_of(request)
-            if session is None:
-                return _json({"error": "unauthorized"}, 401)
-            return await handler(request, session)
-        return wrapped
+        return require_owner(handler)
 
     async def me(request, session):
-        return _json({"role": session.get("role", "admin"), "tg_id": session.get("tg_id"),
+        return _json({"role": session.get("role", "owner"), "tg_id": session.get("tg_id"),
                       "actor": session.get("actor")})
 
     async def jobs(request, session):
@@ -361,9 +369,27 @@ def setup(app: web.Application, engine, db, cfg, state, *, session_of, post_sess
             offset = int(qp.get("offset", "0"))
         except ValueError:
             return _json({"error": "bad paging"}, 400)
-        return _json(await jobs_view(db, qp.get("view", "active"), q=qp.get("q"),
-                                     user=qp.get("user"), dfrom=qp.get("from"),
-                                     dto=qp.get("to"), limit=limit, offset=offset))
+        view = qp.get("view") or qp.get("status") or "active"
+        if view == "queued":
+            view = "queue"
+        data = await jobs_view(db, view, q=qp.get("q"),
+                               user=qp.get("user"), dfrom=qp.get("from"),
+                               dto=qp.get("to"), limit=limit, offset=offset)
+        # Compatibility: keep both 'jobs' and 'items', and provide 'counts'
+        data["jobs"] = data.get("items", [])
+        counts = {"active": 0, "queued": 0, "completed": 0, "failed": 0, "cancelled": 0}
+        try:
+            c_rows = await db.fetch("SELECT status, count(*) AS n FROM jobs GROUP BY status")
+            for cr in c_rows:
+                st = cr["status"]
+                if st == "processing":
+                    counts["active"] = int(cr["n"])
+                elif st in counts:
+                    counts[st] = int(cr["n"])
+        except Exception:
+            pass
+        data["counts"] = counts
+        return _json(data)
 
     async def job(request, session):
         data = await job_detail(db, request.match_info["job_id"])
@@ -378,25 +404,19 @@ def setup(app: web.Application, engine, db, cfg, state, *, session_of, post_sess
     async def system(request, session):
         return _json(await system_view(engine, db, cfg, state))
 
-    async def moderate(request: web.Request):
-        session = post_session_of(request)
-        if session is None:
-            return _json({"error": "unauthorized"}, 401)
-        if session.get("role") != "owner":
-            # Owner-only decision, enforced server-side (not just a hidden button).
-            return _json({"error": "owner only"}, 403)
+    async def moderate(request: web.Request, session: dict):
         jid = request.match_info["job_id"]
-        actor = session.get("tg_id") or cfg.owner_telegram_id or 0
+        actor = session.get("tg_id") or cfg.owner_telegram_id or OWNER_TELEGRAM_ID
         res = await engine.moderate_job(jid, actor)
         await audit_mod.log_action(db, session.get("actor", "owner"), "owner",
                                    "moderation.remove_ban", jid, str(res), "web",
                                    client_ip(request))
         return _json(res, 200 if res.get("ok") else 409)
 
-    app.router.add_get("/panel/api/v3/me", _auth(me))
-    app.router.add_get("/panel/api/v3/jobs", _auth(jobs))
-    app.router.add_get("/panel/api/v3/job/{job_id}", _auth(job))
-    app.router.add_get("/panel/api/v3/users", _auth(users))
-    app.router.add_get("/panel/api/v3/moderation", _auth(moderation))
-    app.router.add_get("/panel/api/v3/system", _auth(system))
-    app.router.add_post("/panel/api/v3/job/{job_id}/moderate", moderate)
+    app.router.add_get("/panel/api/v3/me", require_owner(me))
+    app.router.add_get("/panel/api/v3/jobs", require_owner(jobs))
+    app.router.add_get("/panel/api/v3/job/{job_id}", require_owner(job))
+    app.router.add_get("/panel/api/v3/users", require_owner(users))
+    app.router.add_get("/panel/api/v3/moderation", require_owner(moderation))
+    app.router.add_get("/panel/api/v3/system", require_owner(system))
+    app.router.add_post("/panel/api/v3/job/{job_id}/moderate", require_owner(moderate))

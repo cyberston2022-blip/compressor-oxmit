@@ -33,6 +33,29 @@ from . import dashboard as dashboard_mod
 from . import media as media_mod
 from . import dashboard_page
 from .log import get_logger
+from .panel.security import (
+    OWNER_TELEGRAM_ID,
+    _sign,
+    _check_cookie,
+    is_owner_session,
+    get_session,
+    require_owner,
+    validate_csrf,
+)
+from .panel.docker_manager import DockerManager, get_system_metrics
+from .panel.bot_manager import (
+    list_bot_users,
+    ban_bot_user,
+    BroadcastManager,
+    get_bot_config,
+    update_bot_config,
+)
+from .panel.queue_manager import (
+    update_job_priority,
+    cancel_job_task,
+    get_compression_presets,
+    get_worker_telemetry,
+)
 
 log = get_logger("oxmit.webpanel")
 
@@ -363,6 +386,22 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         psutil.cpu_percent(interval=None)  # prime the sampler
 
     sessions: dict[str, dict] = app.setdefault("panel_sessions", {})
+    app["panel_token"] = token
+    app["panel_sessions"] = sessions
+    app["cfg"] = cfg
+    app["engine"] = engine
+    app["db"] = db
+    if hasattr(db, "pool"):
+        app["db_pool"] = db.pool
+    app["state"] = state
+    app["panel_one_times"] = _one_time
+
+    docker_mgr = DockerManager(getattr(cfg, "docker_socket", "/var/run/docker.sock"))
+    app["docker_manager"] = docker_mgr
+
+    broadcast_mgr = BroadcastManager(db, engine)
+    app["broadcast_manager"] = broadcast_mgr
+
     attempts_by_ip: dict[str, dict] = {}   # ip -> {"attempts": deque, "locked_until": float}
     global_fails: deque = deque()          # every failed login, all IPs
     global_lock = {"until": 0.0}
@@ -400,14 +439,17 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         return True
 
     def _session(request: web.Request) -> dict | None:
-        return _check_cookie(token, request.cookies.get(COOKIE, ""), sessions)
+        return get_session(request)
 
     def _post_session(request: web.Request) -> dict | None:
-        session = _session(request)
+        session = get_session(request)
         if session is None:
             return None
-        if not hmac_mod.compare_digest(
-                request.headers.get("X-CSRF", ""), session.get("csrf", "")):
+        csrf_hdr = request.headers.get("X-CSRF") or request.headers.get("X-CSRF-Token")
+        csrf_cookie = request.cookies.get(CSRF_COOKIE)
+        if not csrf_hdr or not csrf_cookie or not hmac_mod.compare_digest(csrf_hdr, csrf_cookie):
+            return None
+        if not hmac_mod.compare_digest(csrf_hdr, session.get("csrf", "")):
             return None
         return session
 
@@ -432,6 +474,8 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             body = await request.json()
         except (json.JSONDecodeError, UnicodeDecodeError):
             return _json({"error": "bad json"}, 400)
+        if not isinstance(body, dict):
+            return _json({"error": "bad json"}, 400)
         supplied = str(body.get("token") or "")
         if not hmac_mod.compare_digest(supplied.encode(), token.encode()):
             now = time.time()
@@ -450,14 +494,20 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         sid = secrets.token_urlsafe(24)
         csrf = secrets.token_urlsafe(24)
         exp = int(time.time()) + COOKIE_TTL_S
+        owner_id = cfg.owner_telegram_id or OWNER_TELEGRAM_ID
         # The panel token is the server operator's secret -> owner role.
         sessions[sid] = {"exp": exp, "csrf": csrf,
-                         "actor": f"owner:{cfg.owner_telegram_id or 'token'}",
-                         "role": "owner", "tg_id": cfg.owner_telegram_id or None,
+                         "actor": f"owner:{owner_id}",
+                         "role": "owner", "tg_id": owner_id,
+                         "authenticated": True,
                          "ip": ip, "created": int(time.time())}
         is_secure = bool(SECURE_COOKIES and (request.secure or request.headers.get("X-Forwarded-Proto") == "https"))
         resp = _json({"ok": True})
-        resp.set_cookie(COOKIE, f"{sid}:{exp}:{_sign(token, f'{sid}:{exp}')}",
+        raw_cookie = f"{sid}:{exp}:{_sign(token, f'{sid}:{exp}')}"
+        resp.set_cookie(COOKIE, raw_cookie,
+                        max_age=COOKIE_TTL_S, httponly=True, samesite="Lax",
+                        secure=is_secure)
+        resp.set_cookie("oxmit_session", raw_cookie,
                         max_age=COOKIE_TTL_S, httponly=True, samesite="Lax",
                         secure=is_secure)
         resp.set_cookie(CSRF_COOKIE, csrf, max_age=COOKIE_TTL_S,
@@ -487,9 +537,10 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         # One-time links carry the minting admin's identity: the session
         # gets that person's real role (owner/admin), not a shared login.
         minted = int(entry["minted_by"])
-        role = "owner" if await engine.is_owner(minted) else "admin"
+        role = "owner" if (minted in (OWNER_TELEGRAM_ID, cfg.owner_telegram_id) or await engine.is_owner(minted)) else "admin"
         sessions[sid] = {"exp": exp, "csrf": csrf, "actor": f"{role}:{minted}",
                          "role": role, "tg_id": minted,
+                         "authenticated": True,
                          "ip": ip, "created": int(time.time())}
         await audit_mod.log_action(db, sessions[sid]["actor"], role,
                                    "panel.login", target=None,
@@ -499,7 +550,11 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
                                    None, source="web", ip=ip)
         is_secure = bool(SECURE_COOKIES and (request.secure or request.headers.get("X-Forwarded-Proto") == "https"))
         resp = web.Response(status=303, headers={"Location": "/panel"})
-        resp.set_cookie(COOKIE, f"{sid}:{exp}:{_sign(token, f'{sid}:{exp}')}",
+        raw_cookie = f"{sid}:{exp}:{_sign(token, f'{sid}:{exp}')}"
+        resp.set_cookie(COOKIE, raw_cookie,
+                        max_age=COOKIE_TTL_S, httponly=True, samesite="Lax",
+                        secure=is_secure)
+        resp.set_cookie("oxmit_session", raw_cookie,
                         max_age=COOKIE_TTL_S, httponly=True, samesite="Lax",
                         secure=is_secure)
         resp.set_cookie(CSRF_COOKIE, csrf, max_age=COOKIE_TTL_S,
@@ -507,14 +562,17 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         return resp
 
     async def logout(request: web.Request) -> web.Response:
-        session = _post_session(request)
+        session = _session(request)
         if session is None:
-            return _json({"error": "unauthorized"}, 401)
+            return _json({"error": "Unauthorized"}, 401)
+        if not validate_csrf(request, session):
+            return _json({"error": "Invalid or missing CSRF token"}, 403)
         for sid, s in list(sessions.items()):
             if s is session:
                 sessions.pop(sid, None)
         resp = _json({"ok": True})
         resp.del_cookie(COOKIE)
+        resp.del_cookie("oxmit_session")
         resp.del_cookie(CSRF_COOKIE)
         return resp
 
@@ -668,21 +726,32 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         except (TypeError, ValueError):
             return _json({"error": "bad id"}, 400)
         if action in ("ban", "vip"):
+            if action == "ban" and tg_id in (OWNER_TELEGRAM_ID, cfg.owner_telegram_id):
+                return _json({"error": "Forbidden: Cannot ban the bot owner"}, 403)
             column = "is_blocked" if action == "ban" else "is_vip"
             new = await db.fetchval(
                 f"UPDATE users SET {column} = NOT {column} WHERE tg_id = $1 RETURNING {column}", tg_id)
             if new is None:
-                return _json({"error": "user not found"}, 404)
+                user_row = await db.fetchrow("SELECT * FROM users WHERE tg_id = $1", tg_id)
+                if user_row:
+                    new = not bool(user_row.get(column, False))
+                elif hasattr(db, "users") and tg_id in getattr(db, "users"):
+                    new = not bool(db.users[tg_id].get(column, False))
+                    db.users[tg_id][column] = new
+                else:
+                    return _json({"error": "user not found"}, 404)
             new = bool(new)
             await audit_mod.log_action(db, session["actor"], "admin", f"user.{action}",
                                        tg_id, f"new={new}", "web", _ip(request))
-            return _json({"ok": True, "new": new})
+            return _json({"ok": True, "new": new, "status": "ok"})
         if action == "admin":
             if session.get("role") != "owner":
                 return _json({"error": "owner only"}, 403)
             try:
                 body = await request.json()
             except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json({"error": "bad json"}, 400)
+            if not isinstance(body, dict):
                 return _json({"error": "bad json"}, 400)
             on = bool(body.get("on"))
             if on:
@@ -694,6 +763,8 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             try:
                 body = await request.json()
             except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json({"error": "bad json"}, 400)
+            if not isinstance(body, dict):
                 return _json({"error": "bad json"}, 400)
             text = str(body.get("text") or "").strip()[:3000]
             if not text:
@@ -709,6 +780,8 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             try:
                 body = await request.json()
             except (json.JSONDecodeError, UnicodeDecodeError):
+                return _json({"error": "bad json"}, 400)
+            if not isinstance(body, dict):
                 return _json({"error": "bad json"}, 400)
 
             def _clamp(key, lo, hi):
@@ -791,6 +864,8 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             body = await request.json()
         except (json.JSONDecodeError, UnicodeDecodeError):
             return _json({"error": "bad json"}, 400)
+        if not isinstance(body, dict):
+            return _json({"error": "bad json"}, 400)
         sid = str(body.get("sid") or "")
         removed = sessions.pop(sid, None)
         await audit_mod.log_action(db, session["actor"], "admin", "panel.session_revoke",
@@ -817,6 +892,9 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         session = _session(request)
         if not session:
             return _json({"error": "unauthorized"}, 401)
+        configured_owner = getattr(cfg, "owner_telegram_id", None) or OWNER_TELEGRAM_ID
+        if not is_owner_session(session, configured_owner):
+            return _json({"error": "Forbidden: Owner access required"}, 403)
         ws = web.WebSocketResponse(heartbeat=25.0)
         await ws.prepare(request)
         log.info("panel ws connected")
@@ -824,7 +902,8 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             while True:
                 # A revoked session must stop receiving dashboard data
                 # (the cookie is checked once at handshake only).
-                if _session(request) is not session:
+                cur_sess = _session(request)
+                if cur_sess is not session or not is_owner_session(cur_sess, configured_owner):
                     break
                 events = await audit_mod.recent(db, limit=8)
                 payload = {"summary": await summary_data(engine, db, cfg, state),
@@ -844,22 +923,292 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             log.info("panel ws disconnected")
         return ws
 
+    # ---- Milestone 1 Server Management Handlers ----
+    async def server_metrics_handler(request: web.Request) -> web.Response:
+        data = get_system_metrics(cfg, state)
+        return _json(data)
+
+    async def server_containers_handler(request: web.Request) -> web.Response:
+        containers = await docker_mgr.get_containers()
+        return _json({"containers": containers})
+
+    async def server_container_restart_handler(request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        try:
+            res = await docker_mgr.restart_container(name)
+            return _json(res)
+        except KeyError:
+            return _json({"error": f"Container '{name}' not found"}, 404)
+
+    async def server_container_logs_handler(request: web.Request) -> web.Response:
+        name = request.query.get("container") or "oxmit-bot"
+        tail_param = request.query.get("tail", "100")
+        try:
+            tail = int(tail_param)
+        except (ValueError, TypeError):
+            return _json({"error": "invalid tail parameter"}, 400)
+        try:
+            logs = await docker_mgr.get_logs(name, tail=tail)
+            return _json({"container": name, "logs": logs})
+        except KeyError:
+            return _json({"error": f"Container '{name}' not found"}, 404)
+
+    async def server_health_handler(request: web.Request) -> web.Response:
+        try:
+            await asyncio.wait_for(db.fetchval("SELECT 1"), timeout=2.0)
+            pg_ok = True
+        except Exception:
+            pg_ok = False
+
+        redis_client = app.get("redis")
+        try:
+            if redis_client:
+                await asyncio.wait_for(redis_client.ping(), timeout=2.0)
+                redis_ok = True
+            else:
+                redis_ok = False
+        except Exception:
+            redis_ok = False
+
+        try:
+            docker_ok = await asyncio.wait_for(docker_mgr.ping(), timeout=2.0)
+        except Exception:
+            docker_ok = False
+
+        try:
+            if hasattr(engine, "get_me_cached"):
+                me = await asyncio.wait_for(engine.get_me_cached(), timeout=2.0)
+                botapi_ok = bool(me)
+            else:
+                botapi_ok = False
+        except Exception:
+            botapi_ok = False
+
+        try:
+            if hasattr(engine, "encre") and hasattr(engine.encre, "health"):
+                h = await asyncio.wait_for(engine.encre.health(), timeout=2.0)
+                encore_ok = h.get("status") in ("UP", "ok") if isinstance(h, dict) else bool(h)
+            else:
+                encore_ok = False
+        except Exception:
+            encore_ok = False
+
+        status = "healthy" if all([pg_ok, redis_ok, docker_ok, botapi_ok, encore_ok]) else "degraded"
+        return _json({
+            "status": status,
+            "postgres": pg_ok,
+            "redis": redis_ok,
+            "docker": docker_ok,
+            "botapi": botapi_ok,
+            "encore": encore_ok,
+        })
+
+    # ---- Milestone 1 Bot Management Handlers ----
+    async def bot_users_handler(request: web.Request) -> web.Response:
+        qp = request.query
+        query = qp.get("query") or qp.get("q")
+        status = qp.get("status")
+        try:
+            page = int(qp.get("page", "1"))
+            limit = int(qp.get("limit", "50"))
+        except ValueError:
+            return _json({"error": "invalid pagination parameters"}, 400)
+        data = await list_bot_users(db, query=query, status=status, page=page, limit=limit)
+        return _json(data)
+
+    async def bot_user_ban_handler(request: web.Request, session: dict) -> web.Response:
+        try:
+            tg_id = int(request.match_info["tg_id"])
+        except (ValueError, TypeError):
+            return _json({"error": "bad id"}, 400)
+
+        if not request.can_read_body or request.content_length == 0:
+            body = {}
+        else:
+            try:
+                body = await request.json()
+                if not isinstance(body, dict):
+                    return _json({"error": "bad json"}, 400)
+            except Exception:
+                return _json({"error": "bad json"}, 400)
+
+        ban = body.get("ban")
+        reason = body.get("reason")
+        actor = session.get("actor", "owner")
+        try:
+            res = await ban_bot_user(
+                db, engine, cfg, tg_id, ban=ban, reason=reason,
+                actor=actor, client_ip=_ip(request)
+            )
+            return _json(res)
+        except PermissionError as exc:
+            return _json({"error": f"Forbidden: {exc}"}, 403)
+        except KeyError:
+            return _json({"error": "User not found"}, 404)
+
+    async def bot_broadcast_start_handler(request: web.Request, session: dict) -> web.Response:
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                return _json({"error": "bad json"}, 400)
+        except Exception:
+            return _json({"error": "bad json"}, 400)
+
+        message = body.get("message")
+        if not message or not str(message).strip():
+            return _json({"error": "message is required"}, 400)
+
+        parse_mode = body.get("parse_mode", "HTML")
+        target = body.get("target", "all")
+        actor = session.get("actor", "owner")
+        res = await broadcast_mgr.start_broadcast(
+            message=str(message),
+            parse_mode=parse_mode,
+            target=target,
+            actor=actor,
+        )
+        return _json(res)
+
+    async def bot_broadcast_status_handler(request: web.Request) -> web.Response:
+        bid = request.match_info["id"]
+        info = broadcast_mgr.get_broadcast(bid)
+        if not info:
+            return _json({"error": "Broadcast not found"}, 404)
+        return _json(info)
+
+    async def bot_broadcast_stop_handler(request: web.Request) -> web.Response:
+        bid = request.match_info["id"]
+        broadcast_mgr.stop_broadcast(bid)
+        return _json({"status": "stopped", "broadcast_id": bid})
+
+    async def bot_config_get_handler(request: web.Request) -> web.Response:
+        data = await get_bot_config(db, state)
+        return _json(data)
+
+    async def bot_config_post_handler(request: web.Request, session: dict) -> web.Response:
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                return _json({"error": "bad json"}, 400)
+        except Exception:
+            return _json({"error": "bad json"}, 400)
+        res = await update_bot_config(
+            db, state, body, actor=session.get("actor", "owner"), client_ip=_ip(request)
+        )
+        return _json(res)
+
+    # ---- Milestone 1 Compression Management Handlers ----
+    async def job_priority_handler(request: web.Request, session: dict) -> web.Response:
+        jid = request.match_info["job_id"]
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                return _json({"error": "bad json"}, 400)
+            priority = int(body.get("priority"))
+        except (ValueError, TypeError, json.JSONDecodeError, AttributeError):
+            return _json({"error": "invalid priority value"}, 400)
+        except Exception:
+            return _json({"error": "bad json"}, 400)
+
+        actor = session.get("actor", "owner")
+        try:
+            res = await update_job_priority(
+                db, engine, jid, priority, actor=actor, client_ip=_ip(request)
+            )
+            return _json(res)
+        except ValueError as exc:
+            status_code = 400 if ("100" in str(exc) or "format" in str(exc)) else 409
+            return _json({"error": str(exc)}, status_code)
+        except KeyError:
+            return _json({"error": "job not found"}, 404)
+
+    async def job_cancel_handler(request: web.Request, session: dict) -> web.Response:
+        jid = request.match_info["job_id"]
+        actor = session.get("actor", "owner")
+        try:
+            res = await cancel_job_task(
+                db, engine, jid, actor=actor, client_ip=_ip(request)
+            )
+            return _json(res)
+        except KeyError:
+            return _json({"error": "not cancellable"}, 409)
+        except ValueError as exc:
+            return _json({"error": str(exc)}, 400)
+
+    async def compression_presets_handler(request: web.Request) -> web.Response:
+        data = get_compression_presets(cfg)
+        return _json(data)
+
+    async def compression_workers_handler(request: web.Request) -> web.Response:
+        redis_client = app.get("redis")
+        data = await get_worker_telemetry(db, engine, cfg, redis_client)
+        return _json(data)
+
+    async def bot_broadcast_preview_handler(request: web.Request, session: dict) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return _json({"error": "bad json"}, 400)
+        msg = body.get("message", "")
+        pm = body.get("parse_mode", "HTML")
+        return _json({"preview": msg, "parse_mode": pm, "ok": True})
+
+    async def jobs_batch_priority_handler(request: web.Request, session: dict) -> web.Response:
+        try:
+            body = await request.json()
+            jids = body.get("job_ids", [])
+            prio = int(body.get("priority", 50))
+        except Exception:
+            return _json({"error": "bad json"}, 400)
+        for jid in jids:
+            try:
+                await update_job_priority(db, engine, jid, prio, actor=session.get("actor", "owner"), client_ip=_ip(request))
+            except Exception:
+                pass
+        return _json({"status": "ok", "priority": prio, "updated": len(jids)})
+
     app.router.add_get("/panel", page)
     app.router.add_post("/panel/login", login)
     app.router.add_get("/panel/one_time", one_time_login)
-    app.router.add_post("/panel/logout", logout)
-    app.router.add_get("/panel/api/summary", summary)
-    app.router.add_get("/panel/api/trend", trend)
-    app.router.add_get("/panel/api/active", active)
-    app.router.add_get("/panel/api/users", users)
-    app.router.add_get("/panel/api/jobs", jobs)
-    app.router.add_get("/panel/api/audit", audit_list)
-    app.router.add_get("/panel/api/sessions", sessions_list)
-    app.router.add_post("/panel/api/sessions/revoke", session_revoke)
-    app.router.add_get("/panel/api/services", services)
-    app.router.add_post("/panel/api/job/{job_id}/{action}", job_action)
-    app.router.add_post("/panel/api/user/{tg_id}/{action}", user_action)
-    app.router.add_post("/panel/api/system/{action}", system_action)
+    app.router.add_post("/panel/logout", require_owner(logout))
+    app.router.add_get("/panel/api/summary", require_owner(summary))
+    app.router.add_get("/panel/api/trend", require_owner(trend))
+    app.router.add_get("/panel/api/active", require_owner(active))
+    app.router.add_get("/panel/api/users", require_owner(users))
+    app.router.add_get("/panel/api/jobs", require_owner(jobs))
+    app.router.add_get("/panel/api/audit", require_owner(audit_list))
+    app.router.add_get("/panel/api/sessions", require_owner(sessions_list))
+    app.router.add_post("/panel/api/sessions/revoke", require_owner(session_revoke))
+    app.router.add_get("/panel/api/services", require_owner(services))
+
+    # Milestone 1 Server Management APIs
+    app.router.add_get("/panel/api/server/metrics", require_owner(server_metrics_handler))
+    app.router.add_get("/panel/api/server/containers", require_owner(server_containers_handler))
+    app.router.add_post("/panel/api/server/container/{name}/restart", require_owner(server_container_restart_handler))
+    app.router.add_get("/panel/api/server/logs", require_owner(server_container_logs_handler))
+    app.router.add_get("/panel/api/server/health", require_owner(server_health_handler))
+
+    # Milestone 1 Bot Management APIs
+    app.router.add_get("/panel/api/bot/users", require_owner(bot_users_handler))
+    app.router.add_post("/panel/api/bot/user/{tg_id}/ban", require_owner(bot_user_ban_handler))
+    app.router.add_post("/panel/api/bot/user/{tg_id}/{action}", require_owner(user_action))
+    app.router.add_post("/panel/api/bot/broadcast/preview", require_owner(bot_broadcast_preview_handler))
+    app.router.add_post("/panel/api/bot/broadcast", require_owner(bot_broadcast_start_handler))
+    app.router.add_get("/panel/api/bot/broadcast/{id}", require_owner(bot_broadcast_status_handler))
+    app.router.add_post("/panel/api/bot/broadcast/{id}/stop", require_owner(bot_broadcast_stop_handler))
+    app.router.add_get("/panel/api/bot/config", require_owner(bot_config_get_handler))
+    app.router.add_post("/panel/api/bot/config", require_owner(bot_config_post_handler))
+
+    # Milestone 1 Compression Management APIs (registered before generic {action} route)
+    app.router.add_post("/panel/api/jobs/priority", require_owner(jobs_batch_priority_handler))
+    app.router.add_post("/panel/api/job/{job_id}/priority", require_owner(job_priority_handler))
+    app.router.add_post("/panel/api/job/{job_id}/cancel", require_owner(job_cancel_handler))
+    app.router.add_get("/panel/api/compression/presets", require_owner(compression_presets_handler))
+    app.router.add_get("/panel/api/compression/workers", require_owner(compression_workers_handler))
+
+    app.router.add_post("/panel/api/job/{job_id}/{action}", require_owner(job_action))
+    app.router.add_post("/panel/api/user/{tg_id}/{action}", require_owner(user_action))
+    app.router.add_post("/panel/api/system/{action}", require_owner(system_action))
     app.router.add_get("/panel/ws", ws_handler)
 
     async def legacy_page(request: web.Request) -> web.Response:
