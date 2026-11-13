@@ -19,6 +19,7 @@ class EncoreClient:
             base_url=base_url,
             auth=(user, password) if password else None,
             timeout=httpx.Timeout(30.0, connect=10.0),
+            trust_env=False,
         )
 
     async def aclose(self) -> None:
