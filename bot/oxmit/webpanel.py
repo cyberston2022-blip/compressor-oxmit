@@ -655,9 +655,42 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             hours = int(request.query.get("hours", "168"))
         except (TypeError, ValueError):
             hours = 168
-        return _json(await jobs_data(db, request.query.get("status"),
-                                     request.query.get("profile"),
-                                     request.query.get("q"), hours))
+        status = request.query.get("status") or request.query.get("view")
+        if status in ("all", "any", ""):
+            status = None
+        elif status == "active":
+            status = "processing"
+        elif status == "queue":
+            status = "queued"
+        data = await jobs_data(db, status,
+                               request.query.get("profile"),
+                               request.query.get("q"), hours)
+        limit = request.query.get("limit")
+        if limit:
+            try:
+                data = data[:int(limit)]
+            except (ValueError, TypeError):
+                pass
+        if "v3" in request.path:
+            counts = {"active": 0, "queued": 0, "completed": 0, "failed": 0, "cancelled": 0}
+            try:
+                cnt_rows = await db.fetch("SELECT status, count(*) AS n FROM jobs GROUP BY status")
+                for r in cnt_rows:
+                    st = r.get("status") if isinstance(r, dict) else r["status"]
+                    n = int(r.get("n") if isinstance(r, dict) else r["n"])
+                    if st == "processing":
+                        counts["active"] += n
+                    elif st in counts:
+                        counts[st] += n
+            except Exception:
+                pass
+            return _json({
+                "items": data,
+                "jobs": data,
+                "counts": counts,
+                "total": len(data),
+            })
+        return _json(data)
 
     async def audit_list(request: web.Request) -> web.Response:
         if not _session(request):
@@ -1189,6 +1222,7 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
     app.router.add_get("/panel/api/active", require_owner(active))
     app.router.add_get("/panel/api/users", require_owner(users))
     app.router.add_get("/panel/api/jobs", require_owner(jobs))
+    app.router.add_get("/panel/api/v3/jobs", require_owner(jobs))
     app.router.add_get("/panel/api/audit", require_owner(audit_list))
     app.router.add_get("/panel/api/sessions", require_owner(sessions_list))
     app.router.add_post("/panel/api/sessions/revoke", require_owner(session_revoke))
@@ -1498,14 +1532,14 @@ button:hover {
   <div class="logo-box">O</div>
   <h1>مرکز مدیریت Oxmit</h1>
   <p class="sub">Super-Admin Control Suite v3.2</p>
-  <div class="badge-role">👑 ورود انحصاری مالک (@Oxmit)</div>
+  <div class="badge-role"><svg class="ico" style="vertical-align:-2px;margin-left:5px" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="m2 4 3 12h14l3-12-6 7-4-7-4 7-6-7zm3 16h14"/></svg> ورود انحصاری مالک (@Oxmit)</div>
 
   <input id="t" type="password" placeholder="توکن امنیتی پنل را وارد کنید..." autofocus>
   <button id="btn" onclick="go()">ورود به پنل</button>
   <div class="err" id="e"></div>
 
   <div class="hint">
-    💡 نکته: می‌توانید از طریق دستور <code>/panel</code> داخل ربات تلگرام با لینک یک‌بارمصرف بدون نیاز به توکن وارد شوید.
+    <svg class="ico" style="vertical-align:-2px;margin-left:4px" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/></svg> نکته: می‌توانید از طریق دستور <code>/panel</code> داخل ربات تلگرام با لینک یک‌بارمصرف بدون نیاز به توکن وارد شوید.
   </div>
 </div>
 <script>

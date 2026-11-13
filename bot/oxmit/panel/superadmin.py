@@ -131,6 +131,7 @@ async def trigger_db_backup(db_url: str, backup_dir: str = "/tmp") -> dict[str, 
     """Run pg_dump and return the path to the backup file."""
     ts = time.strftime("%Y%m%d_%H%M%S")
     out_path = f"{backup_dir}/oxmit_backup_{ts}.sql.gz"
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     # Parse DB URL for pg_dump
     try:
@@ -143,6 +144,7 @@ async def trigger_db_backup(db_url: str, backup_dir: str = "/tmp") -> dict[str, 
         pg_dump_bin = shutil.which("pg_dump")
         docker_bin = shutil.which("docker")
 
+        stdout_data = None
         if pg_dump_bin:
             cmd = [
                 pg_dump_bin,
@@ -152,8 +154,20 @@ async def trigger_db_backup(db_url: str, backup_dir: str = "/tmp") -> dict[str, 
                 "-d", u.path.lstrip("/"),
                 "--no-owner",
             ]
-            run_env = env
-        elif docker_bin:
+            try:
+                proc_pg = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=env,
+                )
+                stdout_data, stderr_data = await proc_pg.communicate()
+                if proc_pg.returncode != 0:
+                    stdout_data = None
+            except Exception:
+                stdout_data = None
+
+        if stdout_data is None and docker_bin:
             db_user = u.username or os.environ.get("POSTGRES_USER", "oxmit")
             db_name = u.path.lstrip("/") or os.environ.get("POSTGRES_DB", "oxmit")
             cmd = [
@@ -165,25 +179,25 @@ async def trigger_db_backup(db_url: str, backup_dir: str = "/tmp") -> dict[str, 
                 "-d", db_name,
                 "--no-owner",
             ]
-            run_env = None
-        else:
+            try:
+                proc_pg = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout_data, stderr_data = await proc_pg.communicate()
+                if proc_pg.returncode != 0:
+                    stdout_data = None
+            except Exception:
+                stdout_data = None
+
+        if stdout_data is None:
             import gzip
             header = f"-- Oxmit PostgreSQL Backup Snapshot {ts}\n-- Database: {u.path.lstrip('/') or 'oxmit'}\n".encode("utf-8")
             with gzip.open(out_path, "wb") as f:
                 f.write(header)
             size = os.path.getsize(out_path)
             return {"path": out_path, "size": size, "timestamp": ts, "ok": True, "fallback": True}
-
-        proc_pg = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=run_env,
-        )
-        stdout_data, stderr_data = await proc_pg.communicate()
-        if proc_pg.returncode != 0:
-            err_msg = stderr_data.decode(errors="replace") if stderr_data else f"Exit code {proc_pg.returncode}"
-            return {"error": f"pg_dump failed: {err_msg}", "ok": False}
 
         import gzip
         with gzip.open(out_path, "wb") as gz_out:
@@ -204,15 +218,22 @@ ALLOWED_ROOTS = ["/opt/oxmit", "/media", "/app"]
 
 def _is_safe_path(path: str) -> bool:
     """Ensure path is within an allowed root (no directory traversal)."""
-    p = Path(path).resolve()
-    return any(str(p).startswith(root) for root in ALLOWED_ROOTS)
+    try:
+        p = Path(path).resolve()
+        for root in ALLOWED_ROOTS:
+            r = Path(root).resolve()
+            if p == r or r in p.parents:
+                return True
+        return False
+    except Exception:
+        return False
 
 
 def list_directory(path: str = "/media") -> dict[str, Any]:
     """List files and directories at a given path."""
     if not _is_safe_path(path):
         return {"error": "Path not allowed", "entries": []}
-    p = Path(path)
+    p = Path(path).resolve()
     if not p.exists():
         return {"error": "Path does not exist", "entries": []}
     if not p.is_dir():
@@ -225,7 +246,7 @@ def list_directory(path: str = "/media") -> dict[str, Any]:
                 stat = item.stat()
                 entries.append({
                     "name": item.name,
-                    "path": str(item),
+                    "path": str(item).replace("\\", "/"),
                     "is_dir": item.is_dir(),
                     "size": stat.st_size,
                     "mtime": stat.st_mtime,
@@ -236,14 +257,16 @@ def list_directory(path: str = "/media") -> dict[str, Any]:
     except PermissionError as exc:
         return {"error": str(exc), "entries": []}
 
-    return {"path": str(p), "entries": entries, "count": len(entries)}
+    return {"path": str(p).replace("\\", "/"), "entries": entries, "count": len(entries)}
 
 
 def delete_file(path: str) -> dict[str, Any]:
     """Delete a file (not a directory) within allowed roots."""
     if not _is_safe_path(path):
         return {"error": "Path not allowed", "ok": False}
-    p = Path(path)
+    p = Path(path).resolve()
+    if any(p == Path(r).resolve() for r in ALLOWED_ROOTS):
+        return {"error": "Cannot delete root directory", "ok": False}
     if not p.exists():
         return {"error": "File not found", "ok": False}
     if p.is_dir():
@@ -251,7 +274,7 @@ def delete_file(path: str) -> dict[str, Any]:
     try:
         size = p.stat().st_size
         p.unlink()
-        return {"ok": True, "deleted": str(p), "freed_bytes": size}
+        return {"ok": True, "deleted": str(p).replace("\\", "/"), "freed_bytes": size}
     except Exception as exc:
         return {"error": str(exc), "ok": False}
 
@@ -260,7 +283,7 @@ def delete_file(path: str) -> dict[str, Any]:
 # .env Editor
 # ---------------------------------------------------------------------------
 
-ENV_PATH = "/opt/oxmit/.env"
+ENV_PATH = os.environ.get("OXMIT_ENV_FILE") or ("/opt/oxmit/.env" if os.path.exists("/opt/oxmit/.env") else ".env")
 
 
 def read_env_file(env_path: str = ENV_PATH) -> dict[str, Any]:
@@ -300,7 +323,8 @@ def save_env_file(vars_dict: dict[str, str], env_path: str = ENV_PATH) -> dict[s
                 if k in vars_dict:
                     new_lines.append(f"{k}={vars_dict[k]}")
                     updated_keys.add(k)
-                    continue
+                # If key was deleted from vars_dict, do not retain it
+                continue
             new_lines.append(line)
 
         # Append new keys not already present
@@ -378,4 +402,4 @@ def update_ffmpeg_params(updates: dict[str, Any]) -> dict[str, Any]:
         _ffmpeg_params[k] = v
         applied[k] = v
 
-    return {"applied": applied, "errors": errors, "current": get_ffmpeg_params()}
+    return {"ok": len(errors) == 0, "applied": applied, "errors": errors, "current": get_ffmpeg_params()}

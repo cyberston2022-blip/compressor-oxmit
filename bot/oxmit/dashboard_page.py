@@ -118,6 +118,16 @@ header {
   border-color: rgba(16, 185, 129, 0.35);
   color: #34d399;
 }
+.badge.warn {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.35);
+  color: #fbbf24;
+}
+.badge.danger {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
 .dot {
   width: 7px;
   height: 7px;
@@ -694,10 +704,10 @@ input[type="range"] {
   </div>
 
   <div class="header-badges">
-    <span class="badge owner" id="badge-role"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="m2 4 3 12h14l3-12-6 7-4-7-4 7-6-7zm3 16h14"/></svg> مالک ربات (@Oxmit)</span>
+    <span class="badge owner" id="badge-role"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="m2 4 3 12h14l3-12-6 7-4-7-4 7-6-7zm3 16h14"/></svg> مالک ربات <bdi dir="ltr">(@Oxmit)</bdi></span>
     <span class="badge" id="badge-access"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg> عمومی</span>
     <span class="badge" id="badge-intake"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><polygon points="6 3 20 12 6 21 6 3"/></svg> پذیرش فعال</span>
-    <span class="badge online" id="badge-ws"><span class="dot" id="dot-ws"></span><span id="text-ws"> لایو (WebSocket)</span></span>
+    <span class="badge online" id="badge-ws"><span class="dot" id="dot-ws"></span><span id="text-ws"> لایو <bdi dir="ltr">(WebSocket)</bdi></span></span>
   </div>
 
   <span class="sp"></span>
@@ -722,7 +732,7 @@ input[type="range"] {
   <button class="nav-tab" data-tab="files"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> فایل‌منیجر سرور</button>
   <button class="nav-tab" data-tab="ffmpeg"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect width="20" height="20" x="2" y="2" rx="2.18" ry="2.18"/><line x1="7" x2="7" y1="2" y2="22"/><line x1="17" x2="17" y1="2" y2="22"/><line x1="2" x2="22" y1="12" y2="12"/><line x1="2" x2="7" y1="7" y2="7"/><line x1="2" x2="7" y1="17" y2="17"/><line x1="17" x2="22" y1="17" y2="17"/><line x1="17" x2="22" y1="7" y2="7"/></svg> تنظیمات انکودر FFmpeg</button>
   <button class="nav-tab" data-tab="env_editor"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg> متغیرهای محیطی .env</button>
-  <button class="nav-tab" data-tab="audit"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg> لاگ‌های امنیتی (Audit)</button>
+  <button class="nav-tab" data-tab="audit"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg> لاگ‌های امنیتی <bdi dir="ltr">(Audit)</bdi></button>
 </nav>
 
 <!-- Main Container -->
@@ -771,7 +781,7 @@ input[type="range"] {
     <div class="grid-2">
       <div class="card">
         <div class="card-head">
-          <h2>📊 وضعیت سرویس‌های زیرساخت</h2>
+          <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--blue)" stroke-width="2" fill="none"><rect width="20" height="8" x="2" y="2" rx="2" ry="2"/><rect width="20" height="8" x="2" y="14" rx="2" ry="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/></svg> وضعیت سرویس‌های زیرساخت</h2>
           <button class="btn" id="btn-refresh-svc">بروزرسانی</button>
         </div>
         <div id="overview-svc-list">
@@ -781,7 +791,7 @@ input[type="range"] {
 
       <div class="card">
         <div class="card-head">
-          <h2>⚡ پردازش‌های جاری سرور</h2>
+          <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--amber)" stroke-width="2" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> پردازش‌های جاری سرور</h2>
           <span class="badge" id="active-tasks-badge">0 تسک</span>
         </div>
         <div id="overview-active-tasks">
@@ -792,7 +802,7 @@ input[type="range"] {
 
     <div class="card">
       <div class="card-head">
-        <h2>📈 آخرین رخدادهای سیستم و فعالیت‌ها</h2>
+        <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--green)" stroke-width="2" fill="none"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg> آخرین رخدادهای سیستم و فعالیت‌ها</h2>
       </div>
       <div class="table-wrap">
         <table id="table-recent-events">
@@ -817,7 +827,7 @@ input[type="range"] {
   <section id="view-tasks" class="view-panel" hidden>
     <div class="card">
       <div class="card-head">
-        <h2>⚡ مدیریت کارهای فشرده‌سازی ویدیو</h2>
+        <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--acc)" stroke-width="2" fill="none"><rect width="20" height="20" x="2" y="2" rx="2.18" ry="2.18"/><line x1="7" x2="7" y1="2" y2="22"/><line x1="17" x2="17" y1="2" y2="22"/><line x1="2" x2="22" y1="12" y2="12"/><line x1="2" x2="7" y1="7" y2="7"/><line x1="2" x2="7" y1="17" y2="17"/><line x1="17" x2="22" y1="17" y2="17"/><line x1="17" x2="22" y1="7" y2="7"/></svg> مدیریت کارهای فشرده‌سازی ویدیو</h2>
         <div class="actions">
           <select id="task-filter-status">
             <option value="active">در حال پردازش (Active)</option>
@@ -825,6 +835,7 @@ input[type="range"] {
             <option value="completed">تکمیل‌شده (Completed)</option>
             <option value="failed">ناموفق (Failed)</option>
             <option value="cancelled">لغو شده (Cancelled)</option>
+            <option value="all">همه کارها (All)</option>
           </select>
           <input type="text" id="task-filter-q" placeholder="شناسه کار یا نام فایل..." style="width:200px">
           <button class="btn pri" id="btn-task-refresh">جستجو و فیلتر</button>
@@ -856,7 +867,7 @@ input[type="range"] {
   <section id="view-docker" class="view-panel" hidden>
     <div class="card">
       <div class="card-head">
-        <h2>🐳 کانتینرهای داکر سرویس Oxmit (/var/run/docker.sock)</h2>
+        <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--blue)" stroke-width="2" fill="none"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg> کانتینرهای داکر سرویس Oxmit (/var/run/docker.sock)</h2>
         <div class="actions">
           <button class="btn pri" id="btn-refresh-docker">بروزرسانی وضعیت</button>
         </div>
@@ -871,11 +882,11 @@ input[type="range"] {
   <section id="view-bot_users" class="view-panel" hidden>
     <div class="card">
       <div class="card-head">
-        <h2>🤖 مدیریت کاربران ربات تلگرام</h2>
+        <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--purple)" stroke-width="2" fill="none"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> مدیریت کاربران ربات تلگرام</h2>
         <div class="actions">
           <input type="text" id="user-search-input" placeholder="آیدی عددی یا @username...">
           <button class="btn pri" id="btn-user-search">جستجو</button>
-          <button class="btn success" id="btn-open-broadcast">📢 ارسال پیام همگانی</button>
+          <button class="btn success" id="btn-open-broadcast"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg> ارسال پیام همگانی</button>
         </div>
       </div>
       <div class="table-wrap">
@@ -883,16 +894,17 @@ input[type="range"] {
           <thead>
             <tr>
               <th>آیدی تلگرام</th>
+              <th>نام و نام خانوادگی</th>
               <th>نام کاربری</th>
-              <th>سهمیه روزانه</th>
-              <th>مصرف امروز</th>
+              <th>کارهای ۲۴ ساعت</th>
+              <th>کل درخواست‌ها</th>
               <th>وضعیت حساب</th>
               <th>آخرین فعالیت</th>
               <th>عملیات</th>
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="7" class="empty">برای مشاهده کاربران جستجو کنید یا کلید اعمال را بزنید...</td></tr>
+            <tr><td colspan="8" class="empty">برای مشاهده کاربران جستجو کنید یا کلید اعمال را بزنید...</td></tr>
           </tbody>
         </table>
       </div>
@@ -903,7 +915,7 @@ input[type="range"] {
   <section id="view-terminal" class="view-panel" hidden>
     <div class="card">
       <div class="card-head">
-        <h2>🖥️ وب‌ترمینال زنده سرور لینوکس (Linux Shell & Docker Exec)</h2>
+        <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--green)" stroke-width="2" fill="none"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg> وب‌ترمینال زنده سرور لینوکس (Linux Shell & Docker Exec)</h2>
         <div class="actions">
           <button class="btn" id="btn-term-clear">پاک‌کردن کنسول</button>
         </div>
@@ -947,22 +959,22 @@ input[type="range"] {
     <div class="grid-2">
       <div class="card">
         <div class="card-head">
-          <h2>🗄️ کنسول کوئری SQL (PostgreSQL)</h2>
-          <button class="btn success" id="btn-db-backup">📦 بکاپ‌گیری فوری (pg_dump)</button>
+          <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--blue)" stroke-width="2" fill="none"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg> کنسول کوئری SQL (PostgreSQL)</h2>
+          <button class="btn success" id="btn-db-backup"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><rect width="20" height="5" x="2" y="3" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"/><path d="M10 12h4"/></svg> بکاپ‌گیری فوری (pg_dump)</button>
         </div>
         <div style="margin-bottom:10px">
-          <textarea id="sql-query-input" rows="6" style="width:100%;font-family:ui-monospace,monospace;font-size:13px;direction:ltr" placeholder="SELECT * FROM tasks ORDER BY created_at DESC LIMIT 20;"></textarea>
+          <textarea id="sql-query-input" rows="6" style="width:100%;font-family:ui-monospace,monospace;font-size:13px;direction:ltr" placeholder="SELECT * FROM jobs ORDER BY enqueued_at DESC LIMIT 20;"></textarea>
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button class="btn" id="btn-sql-snippet-tasks">تسک‌های اخیر</button>
           <button class="btn" id="btn-sql-snippet-users">کاربران پرمصرف</button>
-          <button class="btn pri" id="btn-sql-run">▶️ اجرای کوئری</button>
+          <button class="btn pri" id="btn-sql-run"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polygon points="6 3 20 12 6 21 6 3"/></svg> اجرای کوئری</button>
         </div>
       </div>
 
       <div class="card">
         <div class="card-head">
-          <h2>📊 جداول پایگاه داده و حجم ذخیره‌سازی</h2>
+          <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--blue)" stroke-width="2" fill="none"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/></svg> جداول پایگاه داده و حجم ذخیره‌سازی</h2>
           <button class="btn" id="btn-refresh-tables">بروزرسانی</button>
         </div>
         <div class="table-wrap" style="max-height:280px;overflow-y:auto">
@@ -996,11 +1008,13 @@ input[type="range"] {
   <section id="view-files" class="view-panel" hidden>
     <div class="card">
       <div class="card-head">
-        <h2>📁 مرورگر فایل سرور (/opt/oxmit و /media)</h2>
+        <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--amber)" stroke-width="2" fill="none"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> مرورگر فایل سرور <bdi dir="ltr">(/opt/oxmit و /media)</bdi></h2>
         <div class="actions">
           <input type="text" id="files-current-path" value="/media" style="width:280px;direction:ltr">
           <button class="btn pri" id="btn-files-go">مرور مسیر</button>
-          <button class="btn" id="btn-files-media">📁 پوشه /media</button>
+          <button class="btn" id="btn-files-up" title="یک پوشه بالاتر"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><polyline points="18 15 12 9 6 15"/></svg> پوشه بالاتر (..)</button>
+          <button class="btn" id="btn-files-media"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> پوشه /media</button>
+          <button class="btn" id="btn-files-opt"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> پوشه /opt/oxmit</button>
         </div>
       </div>
       <div class="table-wrap">
@@ -1026,8 +1040,8 @@ input[type="range"] {
   <section id="view-ffmpeg" class="view-panel" hidden>
     <div class="card" style="max-width:850px">
       <div class="card-head">
-        <h2>🎬 تنظیمات سفارشی انکودر FFmpeg (بدون نیاز به ویرایش کد)</h2>
-        <button class="btn pri" id="btn-ffmpeg-save">💾 ذخیره و اعمال آنی</button>
+        <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--acc)" stroke-width="2" fill="none"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="1" x2="7" y1="14" y2="14"/><line x1="9" x2="15" y1="8" y2="8"/><line x1="17" x2="23" y1="16" y2="16"/></svg> تنظیمات سفارشی انکودر FFmpeg (بدون نیاز به ویرایش کد)</h2>
+        <button class="btn pri" id="btn-ffmpeg-save"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> ذخیره و اعمال آنی</button>
       </div>
 
       <div class="slider-group">
@@ -1096,10 +1110,10 @@ input[type="range"] {
   <section id="view-env_editor" class="view-panel" hidden>
     <div class="card">
       <div class="card-head">
-        <h2>⚙️ ویرایشگر زنده متغیرهای محیطی (/opt/oxmit/.env)</h2>
+        <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--blue)" stroke-width="2" fill="none"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg> ویرایشگر زنده متغیرهای محیطی (/opt/oxmit/.env)</h2>
         <div class="actions">
-          <button class="btn" id="btn-env-add">➕ افزودن متغیر</button>
-          <button class="btn pri" id="btn-env-save">💾 ذخیره تغییرات .env</button>
+          <button class="btn" id="btn-env-add"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><line x1="12" x2="12" y1="5" y2="19"/><line x1="5" x2="19" y1="12" y2="12"/></svg> افزودن متغیر</button>
+          <button class="btn pri" id="btn-env-save"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> ذخیره تغییرات .env</button>
         </div>
       </div>
       <p style="color:var(--ink-mut);font-size:12.5px;margin-bottom:14px">
@@ -1115,7 +1129,7 @@ input[type="range"] {
   <section id="view-audit" class="view-panel" hidden>
     <div class="card">
       <div class="card-head">
-        <h2>📋 ثبت رخدادها و لاگ‌های امنیتی (Security Audit)</h2>
+        <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--red)" stroke-width="2" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg> ثبت رخدادها و لاگ‌های امنیتی (Security Audit)</h2>
         <div class="actions">
           <button class="btn pri" id="btn-audit-refresh">بروزرسانی لاگ‌ها</button>
         </div>
@@ -1145,7 +1159,7 @@ input[type="range"] {
 <div class="modal-overlay" id="modal-logs" hidden>
   <div class="modal-box" style="width:min(880px,96%)">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-      <h3 id="modal-log-title">📋 لاگ‌های کانتینر</h3>
+      <h3 id="modal-log-title"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg> لاگ‌های کانتینر</h3>
       <button class="btn" id="btn-close-log-modal">بستن</button>
     </div>
     <div class="terminal-box" style="height:420px">
@@ -1157,14 +1171,14 @@ input[type="range"] {
 <!-- Broadcast Modal -->
 <div class="modal-overlay" id="modal-broadcast" hidden>
   <div class="modal-box">
-    <h3>📢 ارسال پیام همگانی به کاربران ربات</h3>
+    <h3><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="m3 11 18-5v12L3 14v-3z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg> ارسال پیام همگانی به کاربران ربات</h3>
     <p style="color:var(--ink-mut);font-size:12px;margin-bottom:12px">این پیام از طریق بات تلگرام به تمامی کاربران ارسال خواهد شد.</p>
     <div style="margin-bottom:12px">
       <textarea id="broadcast-text" rows="5" style="width:100%" placeholder="متن پیام همگانی خود را اینجا بنویسید..."></textarea>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button class="btn" id="btn-close-broadcast">انصراف</button>
-      <button class="btn pri" id="btn-send-broadcast">🚀 ارسال به همه کاربران</button>
+      <button class="btn pri" id="btn-send-broadcast"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><line x1="22" x2="11" y1="2" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> ارسال به همه کاربران</button>
     </div>
   </div>
 </div>
@@ -1256,7 +1270,7 @@ function renderActiveTasks(activeJobs) {
   }
   container.innerHTML = list.map(j => {
     const pct = Math.round(j.progress_pct !== undefined ? j.progress_pct : (j.progress || 0));
-    const name = j.file_name || j.name || j.fname || "بدون نام";
+    const name = (j.video && (j.video.source_name || j.video.output_name)) || j.file_name || j.name || j.fname || "بدون نام";
     const jid = j.jid || (j.id ? String(j.id).slice(0, 8) : "");
     const profile = j.profile || "default";
     const stage = j.stage || (pct > 0 ? "در حال فشرده‌سازی" : "در صف پردازش");
@@ -1264,7 +1278,7 @@ function renderActiveTasks(activeJobs) {
       <div style="padding:10px 12px;margin-bottom:8px;background:var(--card-hover);border-radius:10px;border:1px solid var(--border)">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <span style="font-weight:600;font-size:0.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70%">${esc(name)}</span>
-          <span class="badge" style="background:rgba(232,86,42,0.15);color:var(--acc);border-color:rgba(232,86,42,0.3)">${esc(profile)}</span>
+          <span class="badge" style="background:rgba(232,86,42,0.15);color:var(--acc);border-color:rgba(232,86,42,0.3)"><bdi dir="ltr">${esc(profile)}</bdi></span>
         </div>
         <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:var(--ink-mut);margin-bottom:6px">
           <span class="mono">#${esc(jid)} · ${esc(stage)}</span>
@@ -1292,6 +1306,7 @@ async function loadOverview() {
     $("#kpi-queue").textContent = fa(c.queued || 0);
     $("#kpi-completed").textContent = fa(c.completed || 0);
     $("#kpi-failed").textContent = fa(c.failed || 0);
+    if ($("#tab-cnt-active")) $("#tab-cnt-active").textContent = (c.active || 0) + (c.queued || 0);
 
     if (metrics.disk) {
       $("#kpi-disk").innerHTML = `<bdi dir="ltr">${fa(metrics.disk.free_gb)} GB</bdi> آزاد`;
@@ -1313,6 +1328,9 @@ async function loadOverview() {
       const mode = String(services.access_mode).replace(/"/g, "").trim();
       const badge = $("#badge-access");
       if (badge) {
+        badge.classList.remove("online", "warn", "danger");
+        if (mode === "public") badge.classList.add("online");
+        else badge.classList.add("warn");
         badge.innerHTML = mode === "private" ?
           '<svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> خصوصی' :
           '<svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg> عمومی';
@@ -1321,6 +1339,9 @@ async function loadOverview() {
     if (services.paused != null) {
       const badge = $("#badge-intake");
       if (badge) {
+        badge.classList.remove("online", "danger");
+        if (services.paused) badge.classList.add("danger");
+        else badge.classList.add("online");
         badge.innerHTML = services.paused ?
           '<svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/></svg> پذیرش متوقف' :
           '<svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><polygon points="6 3 20 12 6 21 6 3"/></svg> پذیرش فعال';
@@ -1360,25 +1381,23 @@ async function loadOverview() {
 
 /* Tasks Tab */
 async function loadTasks() {
-  const status = $("#task-filter-status").value;
-  const q = $("#task-filter-q").value.trim();
+  const status = $("#task-filter-status") ? $("#task-filter-status").value : "active";
+  const q = $("#task-filter-q") ? $("#task-filter-q").value.trim() : "";
   try {
     const p = new URLSearchParams();
-    if (status && status !== "all") {
-      p.set("status", status);
-      p.set("view", status);
-    }
+    p.set("view", status);
     if (q) p.set("q", q);
     p.set("limit", "50");
 
     let data;
     try {
-      data = await api(`/panel/api/jobs?${p.toString()}`);
-    } catch (_) {
       data = await api(`/panel/api/v3/jobs?${p.toString()}`);
+    } catch (_) {
+      const fallbackStatus = status === "active" ? "processing" : (status === "queue" ? "queued" : status);
+      data = await api(`/panel/api/jobs?status=${fallbackStatus}&q=${encodeURIComponent(q)}&limit=50`);
     }
-    const items = Array.isArray(data) ? data : (data.items || []);
-    $("#tab-cnt-active").textContent = items.length;
+    const items = Array.isArray(data) ? data : (data.items || data.jobs || []);
+    if ($("#tab-cnt-active")) $("#tab-cnt-active").textContent = items.length;
 
     if (!items.length) {
       $("#table-tasks tbody").innerHTML = '<tr><td colspan="8" class="empty">تسک فشرده‌سازی در این بخش یافت نشد.</td></tr>';
@@ -1396,29 +1415,44 @@ async function loadTasks() {
     const rows = items.map(t => {
       const id = t.id || t.job_id || "";
       const jid = t.jid || (typeof id === 'string' ? id.slice(0, 8) : id);
-      const name = t.file_name || t.target_name || t.fname || "بدون نام";
-      const user = (t.first_name || t.user || "") + (t.username ? ` (@${t.username})` : "") || (t.user_id ? String(t.user_id) : (t.tg ? String(t.tg) : "—"));
+      const name = (t.video && (t.video.source_name || t.video.output_name)) || t.file_name || t.target_name || t.fname || "بدون نام";
+
+      let userStr = "—";
+      if (t.user && typeof t.user === "object") {
+        const uname = t.user.username ? ` <bdi dir="ltr">(@${esc(t.user.username)})</bdi>` : "";
+        userStr = (esc(t.user.name || "") + uname) || (t.user.id ? `<span class="mono">${esc(t.user.id)}</span>` : "—");
+      } else {
+        const uname = t.username ? ` <bdi dir="ltr">(@${esc(t.username)})</bdi>` : "";
+        const displayName = t.first_name || t.user || "";
+        userStr = (displayName ? esc(displayName) + uname : "") || (t.user_id || t.tg ? `<span class="mono">${esc(t.user_id || t.tg)}</span>` : "—");
+      }
+
       const st = t.status || "queued";
       const stLabel = t.status_fa || stMap[st] || st;
       const pct = Math.round(t.progress_pct !== undefined ? t.progress_pct : (t.progress || 0));
-      const sizeStr = t.size_human || (t.source_size ? fmtBytes(t.source_size) : "—");
-      const timeStr = (t.created_at || t.enqueued_at || "").slice(0, 19).replace("T", " ");
+
+      const rawSize = (t.video && (t.video.size || t.video.output_size)) || t.source_size || t.size || 0;
+      const sizeStr = t.size_human || (rawSize ? fmtBytes(rawSize) : "—");
+
+      const rawTime = t.created_at || (t.timings && t.timings.enqueued_at) || t.enqueued_at || "";
+      const timeStr = rawTime ? String(rawTime).slice(0, 19).replace("T", " ") : "—";
       const canCancel = st === "processing" || st === "queued";
+      const profileName = t.profile || t.preset || "default";
 
       return `
         <tr class="clickable">
           <td class="mono">#${esc(jid)}</td>
           <td><b>${esc(name)}</b></td>
-          <td class="mono">${esc(user)}</td>
+          <td class="mono">${userStr}</td>
           <td>
             <span class="pill p-${esc(st)}">${esc(stLabel)}</span>
             ${st === 'processing' ? `<div class="prog-bar"><span style="width:${pct}%"></span></div> <bdi dir="ltr">${pct}%</bdi>` : ''}
           </td>
-          <td><span class="badge">${esc(t.preset || t.profile || "default")}</span></td>
+          <td><span class="badge"><bdi dir="ltr">${esc(profileName)}</bdi></span></td>
           <td class="mono"><bdi dir="ltr">${esc(sizeStr)}</bdi></td>
           <td class="mono"><bdi dir="ltr">${esc(timeStr)}</bdi></td>
           <td>
-            ${canCancel ? `<button class="btn danger" onclick="cancelJob('${esc(id)}')">لغو</button>` : '—'}
+            ${canCancel ? `<button class="btn danger" onclick="cancelJob('${esc(id)}')">لغو کار</button>` : '—'}
           </td>
         </tr>
       `;
@@ -1430,11 +1464,13 @@ async function loadTasks() {
 }
 
 async function cancelJob(id) {
-  if (!confirm(`آیا مطمئن هستید که کار #${id} متوقف و لغو شود؟`)) return;
+  const shortId = typeof id === 'string' ? id.slice(0, 8) : id;
+  if (!confirm(`آیا مطمئن هستید که کار #${shortId} متوقف و لغو شود؟`)) return;
   try {
     await api(`/panel/api/job/${id}/cancel`, { method: "POST" });
-    toast(`تسک #${id} لغو شد`, "success");
+    toast(`تسک #${shortId} با موفقیت لغو شد`, "success");
     loadTasks();
+    if (currentTab === "overview") loadOverview();
   } catch (e) {
     toast(`خطای لغو کار: ${e.message}`, "error");
   }
@@ -1464,8 +1500,8 @@ async function loadDocker() {
           <div><b>وضعیت:</b> ${esc(c.status)}</div>
         </div>
         <div class="container-actions">
-          <button class="btn" onclick="viewContainerLogs('${esc(c.name)}')">📄 لاگ‌ها</button>
-          <button class="btn danger" onclick="restartContainer('${esc(c.name)}')">🔄 ری‌استارت</button>
+          <button class="btn" onclick="viewContainerLogs('${esc(c.name)}')"><svg class="ico" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg> لاگ‌ها</button>
+          <button class="btn danger" onclick="restartContainer('${esc(c.name)}')"><svg class="ico" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> ری‌استارت</button>
         </div>
       </div>
     `).join("");
@@ -1488,7 +1524,7 @@ async function restartContainer(name) {
 
 async function viewContainerLogs(name) {
   $("#modal-logs").hidden = false;
-  $("#modal-log-title").textContent = `📋 لاگ‌های کانتینر: ${name}`;
+  $("#modal-log-title").innerHTML = `<svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg> لاگ‌های کانتینر: ${esc(name)}`;
   $("#modal-log-content").textContent = "در حال بارگذاری آخرین لاگ‌ها...";
   try {
     const res = await api(`/panel/api/server/logs?name=${encodeURIComponent(name)}&tail=100`);
@@ -1619,11 +1655,11 @@ async function runSqlQuery() {
 }
 $("#btn-sql-run").onclick = runSqlQuery;
 $("#btn-sql-snippet-tasks").onclick = () => {
-  $("#sql-query-input").value = "SELECT id, status, user_id, progress_pct, created_at FROM tasks ORDER BY created_at DESC LIMIT 25;";
+  $("#sql-query-input").value = "SELECT id, status, requester_tg_id, profile, progress, enqueued_at FROM jobs ORDER BY enqueued_at DESC LIMIT 25;";
   runSqlQuery();
 };
 $("#btn-sql-snippet-users").onclick = () => {
-  $("#sql-query-input").value = "SELECT telegram_id, username, is_banned, daily_quota, created_at FROM users ORDER BY created_at DESC LIMIT 25;";
+  $("#sql-query-input").value = "SELECT tg_id, first_name, username, total_requests, is_blocked, last_seen_at FROM users ORDER BY total_requests DESC LIMIT 25;";
   runSqlQuery();
 };
 $("#btn-db-backup").onclick = async () => {
@@ -1632,7 +1668,7 @@ $("#btn-db-backup").onclick = async () => {
   try {
     const res = await api("/panel/api/super/db/backup", { method: "POST" });
     if (res.ok) {
-      toast(`✅ بکاپ در سرور ذخیره شد: ${res.path} (${Math.round(res.size/1024)} KB)`, "success");
+      toast(`بکاپ در سرور ذخیره شد: ${res.path} (${Math.round((res.size || 0)/1024)} KB)`, "success");
     } else {
       toast(`خطای بکاپ: ${res.error}`, "error");
     }
@@ -1657,26 +1693,37 @@ async function loadFiles(path) {
       return;
     }
 
-    tbody.innerHTML = entries.map(item => `
-      <tr class="clickable">
-        <td>
-          ${item.is_dir ? '📁' : '📄'}
-          <b ${item.is_dir ? `onclick="loadFiles('${esc(item.path)}')"` : ''}>${esc(item.name)}</b>
-        </td>
-        <td>${item.is_dir ? 'دایرکتوری' : 'فایل'}</td>
-        <td class="mono">${item.is_dir ? '—' : (Math.round(item.size/1024) + ' KB')}</td>
-        <td class="mono">${esc(item.mtime_str)}</td>
-        <td>
-          ${!item.is_dir ? `<button class="btn danger" onclick="deleteServerFile('${esc(item.path)}')">حذف</button>` : ''}
-        </td>
-      </tr>
-    `).join("");
+    tbody.innerHTML = entries.map(item => {
+      const ico = item.is_dir ?
+        '<svg class="ico" style="color:var(--amber)" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>' :
+        '<svg class="ico" style="color:var(--ink-mut)" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg>';
+      return `
+        <tr class="clickable">
+          <td>
+            ${ico}
+            <b ${item.is_dir ? `onclick="loadFiles('${esc(item.path)}')"` : ''}>${esc(item.name)}</b>
+          </td>
+          <td>${item.is_dir ? 'دایرکتوری' : 'فایل'}</td>
+          <td class="mono">${item.is_dir ? '—' : (Math.round(item.size/1024) + ' KB')}</td>
+          <td class="mono"><bdi dir="ltr">${esc(item.mtime_str)}</bdi></td>
+          <td>
+            ${!item.is_dir ? `<button class="btn danger" onclick="deleteServerFile('${esc(item.path)}')">حذف</button>` : ''}
+          </td>
+        </tr>
+      `;
+    }).join("");
   } catch (e) {
     toast(`خطای مرورگر فایل: ${e.message}`, "error");
   }
 }
 $("#btn-files-go").onclick = () => loadFiles($("#files-current-path").value.trim());
 $("#btn-files-media").onclick = () => loadFiles("/media");
+$("#btn-files-opt")?.addEventListener("click", () => loadFiles("/opt/oxmit"));
+$("#btn-files-up")?.addEventListener("click", () => {
+  let cur = ($("#files-current-path")?.value || "/media").trim().replace(/\/+$/, "");
+  let parent = cur.substring(0, cur.lastIndexOf("/")) || "/";
+  loadFiles(parent);
+});
 
 async function deleteServerFile(path) {
   if (!confirm(`آیا مطمئن هستید که فایل زیر حذف شود؟\n${path}`)) return;
@@ -1731,7 +1778,12 @@ $("#btn-ffmpeg-save").onclick = async () => {
       method: "POST",
       body: JSON.stringify(updates)
     });
-    toast("✅ تنظیمات FFmpeg با موفقیت بروزرسانی شد", "success");
+    if (res.ok) {
+      toast("تنظیمات FFmpeg با موفقیت بروزرسانی شد", "success");
+    } else {
+      const errMsgs = Object.entries(res.errors || {}).map(([k, v]) => `${k}: ${v}`).join(", ");
+      toast(`خطای ذخیره: ${errMsgs || res.error || "نامعتبر"}`, "error");
+    }
   } catch (e) {
     toast(`خطای ذخیره: ${e.message}`, "error");
   }
@@ -1799,7 +1851,7 @@ $("#btn-env-save").onclick = async () => {
       body: JSON.stringify({ vars: envVarsCache })
     });
     if (res.ok) {
-      toast("✅ فایل .env با موفقیت ذخیره شد", "success");
+      toast("فایل .env با موفقیت ذخیره شد", "success");
     } else {
       toast(`خطای ذخیره: ${res.error}`, "error");
     }
@@ -1816,28 +1868,40 @@ async function loadBotUsers() {
     const users = res.users || [];
     const tbody = $("#table-users tbody");
     if (!users.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">کاربری یافت نشد</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">کاربری یافت نشد</td></tr>';
       return;
     }
-    tbody.innerHTML = users.map(u => `
-      <tr>
-        <td class="mono">${esc(u.telegram_id)}</td>
-        <td><b>${esc(u.username ? '@'+u.username : 'بدون یوزرنیم')}</b></td>
-        <td class="mono">${fa(u.daily_quota_files || 10)} فایل</td>
-        <td class="mono">${fa(u.used_today_files || 0)}</td>
-        <td>
-          <span class="badge ${u.is_banned ? '' : 'online'}">
-            ${u.is_banned ? '⛔ مسدود' : 'فعال'}
-          </span>
-        </td>
-        <td class="mono">${esc((u.last_activity || u.created_at || '').slice(0, 16).replace('T', ' '))}</td>
-        <td>
-          <button class="btn ${u.is_banned ? 'success' : 'danger'}" onclick="toggleBanUser(${u.telegram_id}, ${!u.is_banned})">
-            ${u.is_banned ? 'آزادسازی' : 'مسدودسازی'}
-          </button>
-        </td>
-      </tr>
-    `).join("");
+    tbody.innerHTML = users.map(u => {
+      const tgId = u.tg_id || u.telegram_id || u.id;
+      const isBlocked = Boolean(u.is_blocked || u.is_banned);
+      const isVip = Boolean(u.is_vip);
+      const lastActive = (u.last_seen_at || u.last_activity || u.created_at || '').slice(0, 16).replace('T', ' ');
+      const todayJobs = u.jobs24 !== undefined ? u.jobs24 : (u.used_today_files || 0);
+      const totalReq = u.total_requests || 0;
+      const uname = u.username ? `<bdi dir="ltr">@${esc(u.username)}</bdi>` : '<span style="color:var(--ink-dim)">—</span>';
+      const fname = esc(u.first_name || 'بدون نام');
+
+      return `
+        <tr>
+          <td class="mono"><b>${esc(tgId)}</b></td>
+          <td><b>${fname}</b> ${isVip ? '<span class="badge" style="color:var(--amber);border-color:rgba(245,158,11,0.35)">VIP</span>' : ''}</td>
+          <td class="mono">${uname}</td>
+          <td class="mono"><bdi dir="ltr">${fa(todayJobs)} کار</bdi></td>
+          <td class="mono"><bdi dir="ltr">${fa(totalReq)}</bdi></td>
+          <td>
+            <span class="badge ${isBlocked ? 'danger' : 'online'}">
+              ${isBlocked ? 'مسدود شده' : 'فعال'}
+            </span>
+          </td>
+          <td class="mono"><bdi dir="ltr">${esc(lastActive || '—')}</bdi></td>
+          <td>
+            <button class="btn ${isBlocked ? 'success' : 'danger'}" onclick="toggleBanUser('${esc(tgId)}', ${!isBlocked})">
+              ${isBlocked ? 'آزادسازی' : 'مسدودسازی'}
+            </button>
+          </td>
+        </tr>
+      `;
+    }).join("");
   } catch (e) {
     toast(`خطای واکشی کاربران: ${e.message}`, "error");
   }
@@ -1845,16 +1909,19 @@ async function loadBotUsers() {
 $("#btn-user-search").onclick = loadBotUsers;
 
 async function toggleBanUser(tgId, ban) {
-  const reason = ban ? prompt("دلیل مسدودسازی را وارد کنید (اختیاری):", "Spam") : "";
+  if (!tgId) { toast("شناسه تلگرام نامعتبر است", "error"); return; }
+  const actionName = ban ? "مسدودسازی" : "آزادسازی";
+  const reason = ban ? prompt("دلیل مسدودسازی کاربر را وارد کنید (اختیاری):", "تخلف از قوانین") : "";
+  if (ban && reason === null) return; // user cancelled prompt
   try {
     await api(`/panel/api/bot/user/${tgId}/ban`, {
       method: "POST",
-      body: JSON.stringify({ ban, reason })
+      body: JSON.stringify({ ban, reason: reason || "" })
     });
-    toast(ban ? "کاربر مسدود شد" : "کاربر آزاد شد", "success");
+    toast(`کاربر #${tgId} با موفقیت ${ban ? "مسدود" : "آزاد"} شد`, "success");
     loadBotUsers();
   } catch (e) {
-    toast(`خطای مسدودسازی: ${e.message}`, "error");
+    toast(`خطای ${actionName}: ${e.message}`, "error");
   }
 }
 
@@ -1872,7 +1939,7 @@ $("#btn-send-broadcast").onclick = async () => {
       method: "POST",
       body: JSON.stringify({ text: msg, parse_mode: "HTML" })
     });
-    toast("✅ ارسال پیام همگانی آغاز شد", "success");
+    toast("ارسال پیام همگانی آغاز شد", "success");
     $("#modal-broadcast").hidden = true;
     $("#broadcast-text").value = "";
   } catch (e) {
@@ -1937,7 +2004,7 @@ $("#btn-toggle-intake").onclick = async () => {
 };
 
 $("#btn-cancel-all").onclick = async () => {
-  if (!confirm("⚠️ اخطار جدی!\nآیا از لغو تمامی کارهای در حال اجرا و صف فشرده‌سازی مطمئن هستید؟")) return;
+  if (!confirm("اخطار جدی: آیا از لغو تمامی کارهای در حال اجرا و صف فشرده‌سازی مطمئن هستید؟")) return;
   try {
     const res = await api("/panel/api/system/cancel_all", { method: "POST" });
     toast(`عملیات اضطراری: ${res.cancelled || 0} کار لغو شدند`, "success");
@@ -1953,9 +2020,10 @@ $("#btn-logout").onclick = async () => {
   location.reload();
 };
 
-/* Wire Refresh and Filter Buttons */
+/* Wire Refresh, Filters and Keyboard Listeners */
 $("#btn-refresh-svc")?.addEventListener("click", () => loadOverview());
 $("#btn-task-refresh")?.addEventListener("click", () => loadTasks());
+$("#task-filter-status")?.addEventListener("change", () => loadTasks());
 $("#btn-refresh-docker")?.addEventListener("click", () => loadDocker());
 $("#btn-refresh-tables")?.addEventListener("click", () => loadDbTables());
 $("#btn-audit-refresh")?.addEventListener("click", () => loadAudit());
@@ -1977,6 +2045,26 @@ $("#files-current-path")?.addEventListener("keydown", e => {
   if (e.key === "Enter") {
     e.preventDefault();
     loadFiles($("#files-current-path").value.trim());
+  }
+});
+$("#sql-query-input")?.addEventListener("keydown", e => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    runSqlQuery();
+  }
+});
+
+/* Modal Dismissals & Keyboard Accessibility */
+$("#modal-logs")?.addEventListener("click", e => {
+  if (e.target.id === "modal-logs") $("#modal-logs").hidden = true;
+});
+$("#modal-broadcast")?.addEventListener("click", e => {
+  if (e.target.id === "modal-broadcast") $("#modal-broadcast").hidden = true;
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") {
+    if ($("#modal-logs")) $("#modal-logs").hidden = true;
+    if ($("#modal-broadcast")) $("#modal-broadcast").hidden = true;
   }
 });
 
