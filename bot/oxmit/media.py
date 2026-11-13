@@ -182,10 +182,28 @@ def _probe_sync(path: str | Path) -> dict:
 
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     duration = None
-    try:
-        duration = float(fmt.get("duration") or video.get("duration") or 0) or None
-    except (TypeError, ValueError):
-        pass
+    for d_cand in (
+        fmt.get("duration"),
+        video.get("duration"),
+        audio.get("duration") if audio else None,
+        (fmt.get("tags") or {}).get("DURATION"),
+        (video.get("tags") or {}).get("DURATION"),
+    ):
+        if d_cand:
+            try:
+                if isinstance(d_cand, str) and ":" in d_cand:
+                    parts = d_cand.split(":")
+                    if len(parts) == 3:
+                        d_val = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                    else:
+                        d_val = float(parts[-1])
+                else:
+                    d_val = float(d_cand)
+                if d_val > 0:
+                    duration = d_val
+                    break
+            except (TypeError, ValueError):
+                pass
     bitrate = None
     try:
         bitrate = int(fmt.get("bit_rate") or 0) or None

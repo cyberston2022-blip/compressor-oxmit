@@ -171,6 +171,7 @@ def _build_summary(db, cfg, state) -> dict:
         "cores": psutil.cpu_count() if psutil else None,
         "uptime_s": int(time.time() - state.started_at),
         "paused": state.paused,
+        "access_mode": getattr(state, "access_mode", "private"),
     }
 
 
@@ -454,12 +455,13 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
                          "actor": f"owner:{cfg.owner_telegram_id or 'token'}",
                          "role": "owner", "tg_id": cfg.owner_telegram_id or None,
                          "ip": ip, "created": int(time.time())}
+        is_secure = bool(SECURE_COOKIES and (request.secure or request.headers.get("X-Forwarded-Proto") == "https"))
         resp = _json({"ok": True})
         resp.set_cookie(COOKIE, f"{sid}:{exp}:{_sign(token, f'{sid}:{exp}')}",
-                        max_age=COOKIE_TTL_S, httponly=True, samesite="Strict",
-                        secure=SECURE_COOKIES)
+                        max_age=COOKIE_TTL_S, httponly=True, samesite="Lax",
+                        secure=is_secure)
         resp.set_cookie(CSRF_COOKIE, csrf, max_age=COOKIE_TTL_S,
-                        httponly=False, samesite="Strict", secure=SECURE_COOKIES)
+                        httponly=False, samesite="Lax", secure=is_secure)
         await audit_mod.log_action(db, sessions[sid]["actor"], "admin",
                                    "panel.login", target=None,
                                    details="web panel login", source="web",
@@ -495,12 +497,13 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         await audit_mod.log_action(db, sessions[sid]["actor"], "admin",
                                    "panel.one_time.used", entry["minted_by"],
                                    None, source="web", ip=ip)
+        is_secure = bool(SECURE_COOKIES and (request.secure or request.headers.get("X-Forwarded-Proto") == "https"))
         resp = web.Response(status=303, headers={"Location": "/panel"})
         resp.set_cookie(COOKIE, f"{sid}:{exp}:{_sign(token, f'{sid}:{exp}')}",
-                        max_age=COOKIE_TTL_S, httponly=True, samesite="Strict",
-                        secure=SECURE_COOKIES)
+                        max_age=COOKIE_TTL_S, httponly=True, samesite="Lax",
+                        secure=is_secure)
         resp.set_cookie(CSRF_COOKIE, csrf, max_age=COOKIE_TTL_S,
-                        httponly=False, samesite="Strict", secure=SECURE_COOKIES)
+                        httponly=False, samesite="Lax", secure=is_secure)
         return resp
 
     async def logout(request: web.Request) -> web.Response:
@@ -759,6 +762,25 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
                                        None, str(drift) if drift else "in-sync",
                                        "web", _ip(request))
             return _json({"ok": True, "drift": drift})
+        if action == "access_mode":
+            current = getattr(state, "access_mode", "private")
+            new_mode = "public" if current == "private" else "private"
+            try:
+                body = await request.json()
+                if body.get("mode") in ("public", "private"):
+                    new_mode = body["mode"]
+            except Exception:
+                pass
+            state.access_mode = new_mode
+            await db.set_config("access_mode", new_mode)
+            await audit_mod.log_action(db, session["actor"], "admin", f"system.access_mode.{new_mode}",
+                                       None, new_mode, "web", _ip(request))
+            return _json({"ok": True, "access_mode": new_mode})
+        if action == "cancel_all":
+            res = await engine.cancel_all_jobs(by_admin=True, reason="webpanel")
+            await audit_mod.log_action(db, session["actor"], "admin", "jobs.cancel_all",
+                                       None, f"cancelled={res['cancelled']}", "web", _ip(request))
+            return _json({"ok": True, **res})
         return _json({"error": "unknown action"}, 400)
 
     async def session_revoke(request: web.Request) -> web.Response:
@@ -1100,6 +1122,7 @@ textarea{width:100%;min-height:90px;border:1px solid var(--line);border-radius:1
         <div style="margin-inline-start:auto;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn danger" type="button" onclick="sysAct('pause','پذیرش درخواست‌ها متوقف شود؟ (کاربران پیام «متوقف» می‌گیرند)')">توقف اضطراری پذیرش</button>
           <button class="btn danger" type="button" onclick="sysAct('resume','پذیرش از سرور گرفته شود؟')">▶️ ادامهٔ پذیرش</button>
+          <button class="btn danger" type="button" onclick="sysAct('cancel_all','آیا از لغو تمامی کارهای در حال پردازش و در صف مطمئن هستید؟')">🚫 لغو تمام کارها</button>
         </div>
       </div>
     </section>
@@ -1316,6 +1339,7 @@ else if(!(await confirmModal('تأیید نگهداری',confirmText||'','اجر
 try{const r=await post('/panel/api/system/'+act);
 if(act==='reconcile'){toast(r.drift&&Object.keys(r.drift).length?'📊 بازتراز شد: '+JSON.stringify(r.drift):'📊 همهٔ شمارنده‌ها همگام بودند')}
 else if(act==='cleanup'){toast('🧹 پاک‌سازی انجام شد — '+fmtB(r.disk_free)+' آزاد')}
+else if(act==='cancel_all'){toast('🚫 تمام کارها لغو شدند: '+r.cancelled+' کار متوقف شد')}
 else toast('✅ انجام شد');loadSystem()}catch(e){toast('خطا: '+e,1)}}
 /* ---------- pause switch ---------- */
 $('#pause-sw').addEventListener('change',async function(){

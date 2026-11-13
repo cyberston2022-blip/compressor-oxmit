@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import deque
 
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions, Message
 
 from .. import forcesub
 from .. import webpanel
@@ -82,7 +82,9 @@ def build_router(engine, db, cfg, state) -> Router:
         await message.answer(
             "🔗 ورود یک‌بارمصرف به پنل مدیریت (۱۰ دقیقه اعتبار دارد):\n" + link +
             "\n\n⚠️ لینک فقط یک‌بار کار می‌کند — آن را در گروه/کانال فوروارد نکنید."
-            "\nاگر لینک منقضی شد دوباره /panel بزنید یا توکن را در فرم وارد کن.")
+            "\nاگر لینک منقضی شد دوباره /panel بزنید یا توکن را در فرم وارد کن.",
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
         log.info("one-time panel link minted", extra={"user_id": message.from_user.id})
 
     @router.callback_query(F.data == "fsub:check")

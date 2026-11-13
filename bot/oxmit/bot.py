@@ -118,6 +118,11 @@ async def main() -> None:
         state.archive_channel_id = await db.get_config("archive_channel_id")
     state.paused = bool(await db.get_config("paused"))
     state.global_thumb = await db.get_config("global_thumb_path")
+    db_mode = await db.get_config("access_mode")
+    if db_mode in ("public", "private"):
+        state.access_mode = db_mode
+    else:
+        state.access_mode = "private" if cfg.owner_only else "public"
 
     try:
         me = await bot.get_me()
@@ -142,6 +147,10 @@ async def main() -> None:
     nav_router.bind_personal_router(personal_router)  # type: ignore[attr-defined]
     support_router = support.build_router(engine, db, cfg, state)
     dp = Dispatcher()
+    owner_mw = OwnerOnlyMiddleware(cfg, state)
+    dp.message.outer_middleware(owner_mw)
+    dp.callback_query.outer_middleware(owner_mw)
+
     dp.include_router(menu.build_router(engine, db, cfg, state))
     # Support BEFORE every other message consumer: an explicitly opened
     # contact session / an owner reply must not be swallowed by intake or
@@ -206,3 +215,29 @@ async def main() -> None:
         await encre.aclose()
         await redis_client.aclose()
         await db.close()
+
+
+from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject, CallbackQuery, Message
+
+class OwnerOnlyMiddleware(BaseMiddleware):
+    def __init__(self, cfg, state) -> None:
+        self.cfg = cfg
+        self.state = state
+
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        is_private = getattr(self.state, "access_mode", "") == "private" or getattr(self.state, "owner_only", False) or getattr(self.cfg, "owner_only", False)
+        if not is_private:
+            return await handler(event, data)
+        user = getattr(event, "from_user", None)
+        if user is None:
+            return await handler(event, data)
+        owner_id = self.cfg.owner_telegram_id
+        is_owner_or_admin = (owner_id and user.id == owner_id) or (user.id in getattr(self.cfg, "admin_ids", []))
+        if not is_owner_or_admin:
+            if isinstance(event, Message):
+                await event.answer("🔒 ربات در حال حاضر در حالت خصوصی قرار دارد و تنها برای مدیران مجاز و مالک ربات (@Oxmit) در دسترس است.")
+            elif isinstance(event, CallbackQuery):
+                await event.answer("🔒 ربات در حال حاضر در حالت خصوصی قرار دارد.", show_alert=True)
+            return
+        return await handler(event, data)

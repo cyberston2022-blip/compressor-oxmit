@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 _FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+_EN_TO_FA = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 
 
 def normalize_digits(text: str | None) -> str:
     """Persian/Arabic digits -> Latin. One helper for every numeric input."""
     return (text or "").translate(_FA_DIGITS)
+
+
+def to_fa_digits(text: any) -> str:
+    """Latin digits -> Persian digits for UI formatting."""
+    return str(text if text is not None else "").translate(_EN_TO_FA)
 
 T: dict[str, dict[str, str]] = {
     "welcome": {
@@ -987,11 +993,13 @@ T["reject"]["fa"].update({
     "user_pending": "شما {max_pending} ویدیوی در انتظار دارید؛ بعد از پردازش آن‌ها دوباره ارسال کنید.",
     "queue_full": "صف پردازش در حال حاضر کاملاً پر است ({cap} کار)؛ درخواست شما ثبت نشد. کمی بعد دوباره ارسال کنید.",
     "blocked_user": "⛔️ دسترسی شما به ربات مسدود شده است.",
+    "private_mode": "🔒 ربات در حال حاضر در حالت خصوصی قرار دارد و تنها برای مدیران مجاز در دسترس است.",
 })
 T["reject"]["en"].update({
     "user_pending": "You already have {max_pending} videos waiting; send more after they finish.",
     "queue_full": "The processing queue is completely full ({cap} jobs); your request was NOT accepted. Please try again later.",
     "blocked_user": "⛔️ Your access to this bot is blocked.",
+    "private_mode": "🔒 The bot is currently in private mode and only available to authorized administrators.",
 })
 
 T.update({

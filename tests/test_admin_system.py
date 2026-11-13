@@ -89,9 +89,10 @@ def test_stage_tracker_marks_current_stage(engine):
            "stage": "encoding", "profile": "level", "source_duration": 60,
            "enqueued_at": None, "started_at": None, "progress": 40}
     text = engine._progress_text(row, "fa", None)
-    assert "⚙️⏳" in text          # encoding is current
-    assert "🧾✅" in text          # queued already done
-    assert "📬　" in text          # delivery pending
+    assert "۳. فشرده‌سازی ویدیو" in text
+    assert "۴۰٪" in text
+    assert "۱. ورود به صف" in text
+    assert "۴. آپلود و ارسال" in text
 
 
 def test_stage_tracker_with_queue_position(engine):
@@ -99,5 +100,5 @@ def test_stage_tracker_with_queue_position(engine):
            "stage": "queued", "profile": "level", "source_duration": 60,
            "enqueued_at": None, "started_at": None, "progress": 0}
     text = engine._progress_text(row, "fa", {"queue_pos": 3})
-    assert "🧾⏳" in text
-    assert "موقعیت شما در صف: 3" in text
+    assert "۱. ورود به صف" in text
+    assert "نوبت: ۳" in text

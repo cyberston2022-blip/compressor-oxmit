@@ -126,8 +126,8 @@ services:
         limits:
           # Max cap; the bot's CPU tuner tightens this live (1 job -> 7 cores,
           # 2 jobs -> 3.2 each — see bot/oxmit/resources.py).
-          cpus: "7.0"
-          memory: 4500M
+          cpus: "1.8"
+          memory: 2500M
 
   # Official tdlib/telegram-bot-api built from a pinned commit.
   # --local: getFile returns local paths (shared volume with the bot) and
@@ -174,6 +174,7 @@ services:
     build: ./bot
     image: oxmit/bot:local
     container_name: oxmit-bot
+    user: "0:0"
     restart: unless-stopped
     logging: *default-logging
     env_file: .env

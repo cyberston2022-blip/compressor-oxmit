@@ -136,6 +136,7 @@ class Settings:
     enable_test_api_requested: bool = False
     redis_url: str = "redis://redis:6379"
     owner_telegram_id: int = 0
+    owner_only: bool = False
     panel_public_url: str = ""
     owner_claim: bool = True
 
@@ -402,6 +403,7 @@ def load_settings() -> Settings:
         os.getenv("ENABLE_TEST_API_CONFIRM", "").strip() == "I-UNDERSTAND-THIS-IS-PROD")
     s.redis_url = os.getenv("REDIS_URL", s.redis_url).rstrip("/")
     s.owner_telegram_id = _int("OWNER_TELEGRAM_ID", 0)
+    s.owner_only = _bool("OWNER_ONLY", False)
     s.panel_public_url = os.getenv("PANEL_PUBLIC_URL", "").strip().rstrip("/")
     s.owner_claim = _bool("OWNER_CLAIM", True)
 

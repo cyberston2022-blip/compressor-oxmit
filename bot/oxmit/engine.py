@@ -29,7 +29,7 @@ from .encore_client import EncoreClient, EncoreError, EncoreNotFound
 from .jobqueue import POST_ENCODE_STAGES, QueueMixin
 from .log import get_logger
 from .profiles import compute_target_params
-from .texts import tr
+from .texts import to_fa_digits, tr
 
 log = get_logger("oxmit.engine")
 
@@ -46,6 +46,8 @@ class RuntimeState:
     started_at: float = field(default_factory=time.time)
     bot_username: str = ""
     global_thumb: str | None = None
+    owner_only: bool = False
+    access_mode: str = "public"
 
 
 class AdmissionError(Exception):
@@ -476,21 +478,6 @@ class JobEngine(QueueMixin):
 
     def _progress_text(self, row, lang: str, info: dict | None = None) -> str:
         info = info or {}
-        tracker = self._tracker_line(row)
-        lines = [tracker]
-        if info.get("queue_pos"):
-            lines.append(tr("queue_position", lang, n=info["queue_pos"]))
-        if info.get("copy_pct") is not None:
-            lines.append(tr("copy_progress", lang, pct=int(info["copy_pct"]),
-                            speed=info.get("copy_speed") or 0))
-        stage_key = {
-            "queued": "stage_queued",
-            "copying": "stage_copying",
-            "encoding": "stage_encoding",
-            "validating": "stage_validating_out",
-            "archiving": "stage_archiving",
-            "delivering": "stage_delivering",
-        }.get(row["stage"] or row["status"], "stage_encoding")
         if info:
             try:
                 progress = int(float(info.get("progress") or 0))
@@ -498,6 +485,7 @@ class JobEngine(QueueMixin):
                 progress = 0
         else:
             progress = int(row["progress"] or 0)
+        progress = max(0, min(100, progress))
         started = _ensure_tz(row["started_at"]) or _ensure_tz(row["enqueued_at"])
         elapsed = _fmt_clock((_utcnow() - started).total_seconds()) if started else "-"
         eta = ""
@@ -508,18 +496,66 @@ class JobEngine(QueueMixin):
                        else (row["duration_s"] if "duration_s" in keys else None))
             if speed and speed > 0 and src_dur and progress > 0:
                 remaining = (float(src_dur) * (100 - progress) / 100) / float(speed)
-                eta = " " + tr("eta_prefix", lang, eta=_fmt_clock(remaining))
-        speed_txt = ""
-        if info and info.get("speed"):
-            speed_txt = " " + tr("status_speed", lang, speed=f"{info['speed']:.1f}")
+                eta = _fmt_clock(remaining)
+
         filled = round(progress / 5)
         bar = "█" * filled + "░" * (20 - filled)
-        header = tr("status_header", lang, job=str(row["id"])[:8], profile=row["profile"])
-        line = tr("status_line", lang, stage=tr(stage_key, lang), progress=progress,
-                  elapsed=elapsed, eta=eta + speed_txt)
-        lines.append(header)
-        lines.append(line)
-        lines.append(f"[{bar}] {int(progress)}%")
+
+        # Persian 4-stage UI (Task A)
+        st = row["stage"] or row["status"]
+        q_pos = info.get("queue_pos")
+        q_pos_str = f" (نوبت: {to_fa_digits(q_pos)})" if q_pos else ""
+
+        if st in ("queued", "deferred"):
+            st1 = f"🔄 ۱. ورود به صف\n   درخواست شما در صف ثبت شد{q_pos_str}"
+            st2 = "⏳ ۲. دانلود ویدیو\n   در انتظار نوبت"
+            st3 = "⏳ ۳. فشرده‌سازی ویدیو\n   در انتظار نوبت"
+            st4 = "⏳ ۴. آپلود و ارسال\n   در انتظار نوبت"
+        elif st in ("reserved", "downloading", "probing", "checking", "copying"):
+            copy_pct = info.get("copy_pct")
+            pct_str = f" ({to_fa_digits(int(copy_pct))}٪)" if copy_pct is not None else ""
+            st1 = "✅ ۱. ورود به صف\n   انجام شد"
+            st2 = f"🔄 ۲. دانلود و آماده‌سازی ویدیو{pct_str}\n   در حال دریافت و آماده‌سازی…"
+            st3 = "⏳ ۳. فشرده‌سازی ویدیو\n   در انتظار شروع"
+            st4 = "⏳ ۴. آپلود و ارسال\n   در انتظار شروع"
+        elif st in ("encoding", "completing"):
+            st1 = "✅ ۱. ورود به صف\n   انجام شد"
+            st2 = "✅ ۲. دانلود ویدیو\n   با موفقیت انجام شد"
+            st3 = f"🔄 ۳. فشرده‌سازی ویدیو\n   [{bar}] {to_fa_digits(progress)}٪"
+            st4 = "⏳ ۴. آپلود و ارسال\n   در انتظار شروع"
+        elif st in ("validating", "archiving", "uploading", "delivering"):
+            st1 = "✅ ۱. ورود به صف\n   انجام شد"
+            st2 = "✅ ۲. دانلود ویدیو\n   با موفقیت انجام شد"
+            st3 = "✅ ۳. فشرده‌سازی ویدیو\n   با موفقیت انجام شد (۱۰۰٪)"
+            st4 = "🔄 ۴. آپلود و ارسال\n   در حال ذخیره‌سازی و ارسال به شما…"
+        else:
+            st1 = "✅ ۱. ورود به صف"
+            st2 = "✅ ۲. دانلود ویدیو"
+            st3 = f"✅ ۳. فشرده‌سازی ({to_fa_digits(progress)}٪)"
+            st4 = "✅ ۴. آپلود و ارسال"
+
+        job_short = str(row["id"])[:8]
+        lines = [
+            f"🎬 **در حال پردازش ویدیوی شما** (`{job_short}`)",
+            "━━━━━━━━━━━━━━━━━━",
+            st1, "",
+            st2, "",
+            st3, "",
+            st4,
+            "━━━━━━━━━━━━━━━━━━",
+        ]
+        if row.get("source_size"):
+            lines.append(f"📦 حجم اولیه: {to_fa_digits(media_mod.human_size(row['source_size']))}")
+        if row.get("duration_s"):
+            lines.append(f"⏱ مدت ویدیو: {to_fa_digits(_fmt_clock(row['duration_s']))}")
+        if info and info.get("speed"):
+            spd_val = f"{info['speed']:.1f}"
+            lines.append(f"⚡ سرعت پردازش: {to_fa_digits(spd_val)}x")
+        if eta:
+            lines.append(f"⏳ زمان باقی‌مانده: حدود {to_fa_digits(eta)} مانده")
+        elif elapsed and elapsed != "-":
+            lines.append(f"⏱ زمان سپری‌شده: {to_fa_digits(elapsed)}")
+
         return "\n".join(lines)
 
     async def _user_pref(self, tg_id: int) -> dict:
@@ -648,6 +684,8 @@ class JobEngine(QueueMixin):
             raise AdmissionError("archive_not_configured")
         if self.state.paused:
             raise AdmissionError("paused")
+        if getattr(self.state, "access_mode", "private") == "private" and not is_admin:
+            raise AdmissionError("private_mode")
         user = await self.db.fetchrow("SELECT is_blocked FROM users WHERE tg_id = $1", tg_id)
         if user and user["is_blocked"]:
             raise AdmissionError("blocked_user")
@@ -1650,6 +1688,64 @@ class JobEngine(QueueMixin):
         log.info("job cancelled",
                  extra={"job_id": str(row["id"]), "detail": f"by_admin={by_admin} reason={reason}"})
         return True
+
+    async def cancel_all_jobs(self, by_admin: bool = True, reason: str = "global_cancel") -> dict:
+        """Forcibly cancel every queued and running compression request (Task E)."""
+        rows = await self.db.fetch(
+            "SELECT * FROM jobs WHERE status IN ('queued', 'processing', 'deferred') ORDER BY enqueued_at ASC"
+        )
+        cancelled = 0
+        active = 0
+        for r in rows:
+            if r["status"] == "processing":
+                active += 1
+            ok = await self.cancel_job(r, by_admin=by_admin, reason=reason)
+            if ok:
+                cancelled += 1
+        return {"total_found": len(rows), "cancelled": cancelled, "active": active}
+
+    async def cleanup_preview(self) -> dict:
+        """Scan media folders and calculate reclaimable storage before deletion (Task F)."""
+        active = await self.db.fetch(
+            "SELECT id, media_id FROM jobs WHERE status IN ('queued','processing')"
+        )
+        active_ids = {str(r["id"]) for r in active}
+        active_media = {str(r["media_id"]) for r in active if r["media_id"]}
+        cutoff = time.time() - self.cfg.tmp_retention_hours * 3600
+        eligible_count = 0
+        eligible_bytes = 0
+        protected_count = 0
+        for base in (self.cfg.media_incoming, self.cfg.media_out,
+                     self.cfg.media_tmp, self.cfg.media_test,
+                     os.path.join(self.cfg.media_root, "work")):
+            root = Path(base)
+            if not root.is_dir():
+                continue
+            for entry in root.iterdir():
+                name = entry.name
+                if name in active_ids or (name.startswith("m-") and name[2:] in active_media):
+                    protected_count += 1
+                    continue
+                try:
+                    st = entry.stat()
+                    if st.st_mtime < cutoff:
+                        eligible_count += 1
+                        if entry.is_dir():
+                            for p in entry.rglob("*"):
+                                if p.is_file():
+                                    eligible_bytes += p.stat().st_size
+                        else:
+                            eligible_bytes += st.st_size
+                    else:
+                        protected_count += 1
+                except OSError:
+                    continue
+        return {
+            "eligible_files": eligible_count,
+            "eligible_bytes": eligible_bytes,
+            "protected_files": protected_count,
+            "disk_free": self._disk_free(),
+        }
 
     # ------------------------------------------------------------------
     # completion

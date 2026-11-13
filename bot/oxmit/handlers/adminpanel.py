@@ -236,15 +236,17 @@ def build_router(engine, db, cfg, state) -> Router:
             [InlineKeyboardButton(text="📊 آمار", callback_data="adm:stats"),
              InlineKeyboardButton(text="🩺 سلامت", callback_data="adm:health")],
             [InlineKeyboardButton(text="⏸/▶️ پذیرش", callback_data="adm:pause"),
-             InlineKeyboardButton(text="📋 صف", callback_data="adm:queue")],
-            [InlineKeyboardButton(text="📡 مانیتور", callback_data="adm:monitor"),
-             InlineKeyboardButton(text="❌ خطاها", callback_data="adm:errors")],
-            [InlineKeyboardButton(text="🧹 پاک‌سازی", callback_data="adm:cleanup"),
-             InlineKeyboardButton(text="🖼 تامبنیل", callback_data="adm:thumb")],
-            [InlineKeyboardButton(text="👥 کاربران", callback_data="uws:0"),
-             InlineKeyboardButton(text="🎚 محدودیت‌ها", callback_data="adm:limits")],
-            [InlineKeyboardButton(text="📢 اطلاع‌رسانی", callback_data="adm:broadcast"),
-             InlineKeyboardButton(text="🚫 بن", callback_data="adm:ban")],
+             InlineKeyboardButton(text="🔒/🌐 دسترسی", callback_data="adm:access_mode")],
+            [InlineKeyboardButton(text="📋 صف", callback_data="adm:queue"),
+             InlineKeyboardButton(text="📡 مانیتور", callback_data="adm:monitor")],
+            [InlineKeyboardButton(text="❌ خطاها", callback_data="adm:errors"),
+             InlineKeyboardButton(text="🧹 پاک‌سازی", callback_data="adm:cleanup")],
+            [InlineKeyboardButton(text="🖼 تامبنیل", callback_data="adm:thumb"),
+             InlineKeyboardButton(text="👥 کاربران", callback_data="uws:0")],
+            [InlineKeyboardButton(text="🎚 محدودیت‌ها", callback_data="adm:limits"),
+             InlineKeyboardButton(text="📢 اطلاع‌رسانی", callback_data="adm:broadcast")],
+            [InlineKeyboardButton(text="🚫 بن", callback_data="adm:ban"),
+             InlineKeyboardButton(text="🚫 لغو تمام درخواست‌ها", callback_data="adm:cancel_all_ask")],
         ]
         # Mandatory-membership settings are owner-only unless the Owner
         # granted forcesub.manage (default deny). Hiding is UX only - every
@@ -364,6 +366,18 @@ def build_router(engine, db, cfg, state) -> Router:
                 tr("admin_paused" if state.paused else "admin_resumed", "fa")
             )
 
+        elif action == "access_mode":
+            current = getattr(state, "access_mode", "private")
+            new_mode = "public" if current == "private" else "private"
+            state.access_mode = new_mode
+            await db.set_config("access_mode", new_mode)
+            await audit_mod.log_action(db, "admin:" + str(callback.from_user.id), "admin",
+                                       f"system.access_mode.{new_mode}", None, new_mode, source="telegram")
+            msg = ("🌐 حالت دسترسی ربات به **عمومی** تغییر یافت (همه کاربران مجاز هستند)."
+                   if new_mode == "public" else
+                   "🔒 حالت دسترسی ربات به **خصوصی** تغییر یافت (فقط مدیران و مالک).")
+            await callback.message.answer(msg)
+
         elif action == "queue":
             queued = await db.fetchval("SELECT count(*) FROM jobs WHERE status='queued'")
             active = await db.fetchval("SELECT count(*) FROM jobs WHERE status='processing'")
@@ -392,13 +406,62 @@ def build_router(engine, db, cfg, state) -> Router:
             await callback.message.answer(f"{tr('admin_recent_errors', 'fa')}\n{body}")
 
         elif action == "cleanup":
+            prev = await engine.cleanup_preview()
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ تأیید پاک‌سازی فایل‌های منقضی", callback_data="adm:cleanup_confirm")],
+                [InlineKeyboardButton(text="❌ انصراف", callback_data="adm:menu")],
+            ])
+            await callback.message.answer(
+                f"🧹 **پیش‌نمایش پاک‌سازی مدیا**\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"فایل‌های قابل حذف: {prev['eligible_files']}\n"
+                f"فضای قابل آزادسازی: {human_size(prev['eligible_bytes'])}\n"
+                f"فایل‌های محافظت‌شده (کارهای فعال): {prev['protected_files']}\n\n"
+                f"فایل‌های کارهای فعال و سورس‌کدها هرگز حذف نخواهند شد.\n"
+                f"آیا برای پاک‌سازی مطمئن هستید؟",
+                reply_markup=kb,
+            )
+
+        elif action == "cleanup_confirm":
+            free_before = engine._disk_free()
             await engine.cleanup_sweep()
+            free_after = engine._disk_free()
+            freed = max(0, free_after - free_before)
             await audit_mod.log_action(db, "admin:" + str(callback.from_user.id), "admin",
                                        "system.cleanup", None,
-                                       human_size(engine._disk_free()),
+                                       human_size(free_after),
                                        source="telegram")
             await callback.message.answer(
-                f"🧹 پاک‌سازی شد؛ دیسک آزاد: {human_size(engine._disk_free())}"
+                f"✅ **پاک‌سازی با موفقیت انجام شد.**\n"
+                f"فضای آزادشده: {human_size(freed)}\n"
+                f"کل فضای آزاد دیسک: {human_size(free_after)}"
+            )
+
+        elif action == "cancel_all_ask":
+            queued = await db.fetchval("SELECT count(*) FROM jobs WHERE status='queued'")
+            active = await db.fetchval("SELECT count(*) FROM jobs WHERE status='processing'")
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ تأیید لغو همه درخواست‌ها", callback_data="adm:cancel_all_confirm")],
+                [InlineKeyboardButton(text="❌ انصراف", callback_data="adm:menu")],
+            ])
+            await callback.message.answer(
+                f"⚠️ **لغو تمام درخواست‌های فشرده‌سازی**\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"درخواست‌های منتظر در صف: {queued}\n"
+                f"درخواست‌های در حال پردازش: {active}\n\n"
+                f"آیا مطمئن هستید؟ تمامی فرایندهای تبدیل و دانلود متوقف و لغو خواهند شد.",
+                reply_markup=kb,
+            )
+
+        elif action == "cancel_all_confirm":
+            res = await engine.cancel_all_jobs(by_admin=True, reason="telegram_admin")
+            await audit_mod.log_action(db, "admin:" + str(callback.from_user.id), "admin",
+                                       "jobs.cancel_all", None,
+                                       f"cancelled={res['cancelled']}",
+                                       source="telegram")
+            await callback.message.answer(
+                f"🚫 **تمامی درخواست‌ها لغو شدند.**\n"
+                f"تعداد کل کارهای متوقف‌شده: {res['cancelled']}"
             )
 
         elif action == "monitor":
