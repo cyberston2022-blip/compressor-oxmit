@@ -376,6 +376,7 @@ async def services_data(engine, db, cfg, state) -> dict:
         ok = False
     return {
         "components": comps, "ok": ok, "paused": state.paused,
+        "access_mode": getattr(state, "access_mode", "private"),
         "archive_configured": bool(state.archive_channel_id),
         "disk_free": shutil.disk_usage(cfg.media_root).free,
         "disk_total": shutil.disk_usage(cfg.media_root).total,
@@ -1258,34 +1259,34 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         query = str(body.get("query", "")).strip()
         if not query:
             return _json({"error": "query is required"}, 400)
-        db_url = getattr(cfg, "database_url", "") or os.environ.get("DATABASE_URL", "")
+        db_url = getattr(cfg, "pg_dsn", "") or os.environ.get("PG_DSN", "") or getattr(cfg, "database_url", "") or os.environ.get("DATABASE_URL", "")
         if not db_url:
-            return _json({"error": "DATABASE_URL not configured"}, 500)
+            return _json({"error": "DATABASE_URL or PG_DSN not configured"}, 500)
         result = await execute_sql(db_url, query)
         return _json(result)
 
     @require_owner
     async def api_sql_tables(request: web.Request) -> web.Response:
         """GET /panel/api/super/db/tables — list PostgreSQL tables."""
-        db_url = getattr(cfg, "database_url", "") or os.environ.get("DATABASE_URL", "")
+        db_url = getattr(cfg, "pg_dsn", "") or os.environ.get("PG_DSN", "") or getattr(cfg, "database_url", "") or os.environ.get("DATABASE_URL", "")
         if not db_url:
-            return _json({"error": "DATABASE_URL not configured"}, 500)
+            return _json({"error": "DATABASE_URL or PG_DSN not configured"}, 500)
         result = await list_db_tables(db_url)
         return _json(result)
 
     @require_owner
     async def api_db_backup(request: web.Request) -> web.Response:
         """POST /panel/api/super/db/backup — trigger pg_dump backup."""
-        db_url = getattr(cfg, "database_url", "") or os.environ.get("DATABASE_URL", "")
+        db_url = getattr(cfg, "pg_dsn", "") or os.environ.get("PG_DSN", "") or getattr(cfg, "database_url", "") or os.environ.get("DATABASE_URL", "")
         if not db_url:
-            return _json({"error": "DATABASE_URL not configured"}, 500)
+            return _json({"error": "DATABASE_URL or PG_DSN not configured"}, 500)
         result = await trigger_db_backup(db_url, backup_dir="/tmp")
         return _json(result)
 
     @require_owner
     async def api_files_list(request: web.Request) -> web.Response:
         """GET /panel/api/super/files — list files in allowed paths."""
-        path = request.rel_url.query.get("path", "/opt/oxmit")
+        path = request.rel_url.query.get("path", "/media")
         result = list_directory(path)
         return _json(result)
 
@@ -1360,6 +1361,9 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
 _LOGIN_PAGE = """<!doctype html><html dir="rtl" lang="fa"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Oxmit Super-Admin — ورود به پنل مدیریت</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap">
 <style>
 :root {
   --bg: #090c13;

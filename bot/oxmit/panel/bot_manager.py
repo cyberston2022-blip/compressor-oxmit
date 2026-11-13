@@ -7,6 +7,7 @@ dynamic runtime configuration.
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -304,7 +305,7 @@ class BroadcastManager:
 async def get_bot_config(db: Any, state: Any) -> dict[str, Any]:
     """Retrieve runtime configuration toggles."""
     config: dict[str, Any] = {
-        "access_mode": getattr(state, "access_mode", "private"),
+        "access_mode": str(getattr(state, "access_mode", "private")).strip('"'),
         "paused": getattr(state, "paused", False),
         "global_thumb": getattr(state, "global_thumb", None) is not None,
         "global_thumb_path": getattr(state, "global_thumb", None),
@@ -312,9 +313,19 @@ async def get_bot_config(db: Any, state: Any) -> dict[str, Any]:
     try:
         rows = await db.fetch("SELECT key, value FROM app_config")
         for r in rows:
-            config[r["key"]] = r["value"]
+            val = r["value"]
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except Exception:
+                    pass
+                if isinstance(val, str):
+                    val = val.strip('"')
+            config[r["key"]] = val
     except Exception:
         pass
+    if "access_mode" in config and isinstance(config["access_mode"], str):
+        config["access_mode"] = config["access_mode"].strip('"')
     return config
 
 
@@ -343,7 +354,7 @@ async def update_bot_config(
         if k == "paused":
             state.paused = bool(v)
         elif k == "access_mode":
-            state.access_mode = str(v)
+            state.access_mode = str(v).strip('"')
         elif k == "global_thumb_path":
             state.global_thumb = v
 

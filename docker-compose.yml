@@ -188,6 +188,7 @@ services:
       - botapi_data:/var/lib/telegram-bot-api
       - ./deploy/certs:/certs:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./.env:/opt/oxmit/.env
     ports:
       - "127.0.0.1:8091:8080"
       - "8090:8081"

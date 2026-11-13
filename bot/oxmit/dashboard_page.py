@@ -4,6 +4,9 @@
 PAGE = r"""<!doctype html><html dir="rtl" lang="fa"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Oxmit Super-Admin — مرکز کنترل فوق پیشرفته</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap">
 <style>
 :root {
   --bg: #0a0d14;
@@ -362,17 +365,40 @@ tr.clickable:hover td { background: var(--card-hover); }
 }
 .pill {
   display: inline-block;
-  padding: 2px 8px;
+  padding: 3px 10px;
   border-radius: 99px;
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
 }
-.p-active { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
-.p-queue { background: rgba(245, 158, 11, 0.15); color: #fbbf24; }
-.p-done { background: rgba(16, 185, 129, 0.15); color: #34d399; }
-.p-fail { background: rgba(239, 68, 68, 0.15); color: #f87171; }
-.p-cancel { background: rgba(100, 116, 139, 0.15); color: #94a3b8; }
+.p-processing, .p-active { background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.35); }
+.p-queued, .p-queue { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35); }
+.p-completed, .p-done { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.35); }
+.p-failed, .p-fail { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.35); }
+.p-cancelled, .p-cancel { background: rgba(100, 116, 139, 0.15); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.35); }
+
+/* SVG Icons */
+.ico {
+  display: inline-block;
+  vertical-align: -2.5px;
+  margin-left: 6px;
+  stroke: currentColor;
+  flex-shrink: 0;
+}
+.nav-tab .ico {
+  width: 16px;
+  height: 16px;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), filter 0.2s;
+}
+.nav-tab:hover .ico,
+.nav-tab.active .ico {
+  transform: scale(1.15);
+  filter: drop-shadow(0 0 6px var(--acc-glow));
+}
+.header-actions .ico, .badge .ico, .card-head .ico {
+  width: 14px;
+  height: 14px;
+}
 
 /* Progress bar */
 .prog-bar {
@@ -623,6 +649,36 @@ input[type="range"] {
   padding: 40px 16px;
   color: var(--ink-mut);
 }
+
+/* Responsive Layout */
+@media (max-width: 960px) {
+  header {
+    padding: 10px 14px;
+    gap: 10px;
+  }
+  .header-badges {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .header-actions {
+    flex-wrap: wrap;
+    gap: 6px;
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .sp { display: none; }
+  .nav-wrap {
+    padding: 8px 12px;
+    overflow-x: auto;
+    white-space: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+  .nav-tab {
+    padding: 7px 12px;
+    font-size: 12px;
+  }
+}
 </style>
 </head>
 <body>
@@ -638,35 +694,35 @@ input[type="range"] {
   </div>
 
   <div class="header-badges">
-    <span class="badge owner" id="badge-role">👑 مالک ربات (@Oxmit)</span>
-    <span class="badge" id="badge-access">🌐 عمومی</span>
-    <span class="badge" id="badge-intake">▶️ پذیرش فعال</span>
-    <span class="badge online" id="badge-ws"><span class="dot" id="dot-ws"></span> لایو</span>
+    <span class="badge owner" id="badge-role"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="m2 4 3 12h14l3-12-6 7-4-7-4 7-6-7zm3 16h14"/></svg> مالک ربات (@Oxmit)</span>
+    <span class="badge" id="badge-access"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg> عمومی</span>
+    <span class="badge" id="badge-intake"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><polygon points="6 3 20 12 6 21 6 3"/></svg> پذیرش فعال</span>
+    <span class="badge online" id="badge-ws"><span class="dot" id="dot-ws"></span><span id="text-ws"> لایو (WebSocket)</span></span>
   </div>
 
   <span class="sp"></span>
 
   <div class="header-actions">
-    <button id="btn-toggle-access" title="تغییر دسترسی عمومی/خصوصی">🔒/🌐 تغییر دسترسی</button>
-    <button id="btn-toggle-intake" title="توقف یا ادامه پذیرش ربات">⏸/▶️ پذیرش</button>
-    <button class="danger" id="btn-cancel-all" title="لغو اضطراری تمام کارهای صف">🔴 لغو اضطراری همه</button>
-    <a class="btn" href="/panel/legacy" target="_blank" title="مشاهده نسخه ساده">داشبورد قدیم</a>
-    <button class="danger" id="btn-logout">خروج</button>
+    <button id="btn-toggle-access" title="تغییر دسترسی عمومی/خصوصی"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> تغییر دسترسی</button>
+    <button id="btn-toggle-intake" title="توقف یا ادامه پذیرش ربات"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/></svg> توقف/ادامه پذیرش</button>
+    <button class="danger" id="btn-cancel-all" title="لغو اضطراری تمام کارهای صف"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><line x1="15" x2="9" y1="9" y2="15"/><line x1="9" x2="15" y1="9" y2="15"/></svg> لغو اضطراری همه</button>
+    <a class="btn" href="/panel/legacy" target="_blank" title="مشاهده نسخه ساده"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg> داشبورد قدیم</a>
+    <button class="danger" id="btn-logout"><svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg> خروج</button>
   </div>
 </header>
 
 <!-- Navigation Tabs -->
 <nav class="nav-wrap" id="nav-tabs">
-  <button class="nav-tab active" data-tab="overview">📊 داشبورد و آمار</button>
-  <button class="nav-tab" data-tab="tasks">⚡ صف و انکودینگ <span class="badge-count" id="tab-cnt-active">0</span></button>
-  <button class="nav-tab" data-tab="docker">🐳 کانتینرهای داکر</button>
-  <button class="nav-tab" data-tab="bot_users">🤖 مدیریت ربات و کاربران</button>
-  <button class="nav-tab" data-tab="terminal">🖥️ وب‌ترمینال زنده</button>
-  <button class="nav-tab" data-tab="sql_console">🗄️ کنسول SQL و دیتابیس</button>
-  <button class="nav-tab" data-tab="files">📁 فایل‌منیجر سرور</button>
-  <button class="nav-tab" data-tab="ffmpeg">🎬 تنظیمات انکودر FFmpeg</button>
-  <button class="nav-tab" data-tab="env_editor">⚙️ متغیرهای محیطی .env</button>
-  <button class="nav-tab" data-tab="audit">📋 لاگ‌های امنیتی (Audit)</button>
+  <button class="nav-tab active" data-tab="overview"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg> داشبورد و آمار</button>
+  <button class="nav-tab" data-tab="tasks"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> صف و انکودینگ <span class="badge-count" id="tab-cnt-active">0</span></button>
+  <button class="nav-tab" data-tab="docker"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg> کانتینرهای داکر</button>
+  <button class="nav-tab" data-tab="bot_users"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> مدیریت ربات و کاربران</button>
+  <button class="nav-tab" data-tab="terminal"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg> وب‌ترمینال زنده</button>
+  <button class="nav-tab" data-tab="sql_console"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg> کنسول SQL و دیتابیس</button>
+  <button class="nav-tab" data-tab="files"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg> فایل‌منیجر سرور</button>
+  <button class="nav-tab" data-tab="ffmpeg"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect width="20" height="20" x="2" y="2" rx="2.18" ry="2.18"/><line x1="7" x2="7" y1="2" y2="22"/><line x1="17" x2="17" y1="2" y2="22"/><line x1="2" x2="22" y1="12" y2="12"/><line x1="2" x2="7" y1="7" y2="7"/><line x1="2" x2="7" y1="17" y2="17"/><line x1="17" x2="22" y1="17" y2="17"/><line x1="17" x2="22" y1="7" y2="7"/></svg> تنظیمات انکودر FFmpeg</button>
+  <button class="nav-tab" data-tab="env_editor"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg> متغیرهای محیطی .env</button>
+  <button class="nav-tab" data-tab="audit"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg> لاگ‌های امنیتی (Audit)</button>
 </nav>
 
 <!-- Main Container -->
@@ -942,7 +998,7 @@ input[type="range"] {
       <div class="card-head">
         <h2>📁 مرورگر فایل سرور (/opt/oxmit و /media)</h2>
         <div class="actions">
-          <input type="text" id="files-current-path" value="/opt/oxmit" style="width:280px;direction:ltr">
+          <input type="text" id="files-current-path" value="/media" style="width:280px;direction:ltr">
           <button class="btn pri" id="btn-files-go">مرور مسیر</button>
           <button class="btn" id="btn-files-media">📁 پوشه /media</button>
         </div>
@@ -1124,6 +1180,13 @@ const $$ = s => document.querySelectorAll(s);
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 const fa = n => n == null ? "—" : Number(n).toLocaleString("fa-IR");
 
+const fmtBytes = b => {
+  if (b == null || isNaN(b) || b === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(b) / Math.log(1024));
+  return (b / Math.pow(1024, i)).toFixed(i > 1 ? 1 : 0) + " " + (units[i] || "B");
+};
+
 function toast(msg, type="info") {
   const c = $("#toasts");
   const el = document.createElement("div");
@@ -1181,13 +1244,46 @@ function loadTabData(tabId) {
   else if (tabId === "audit") loadAudit();
 }
 
+function renderActiveTasks(activeJobs) {
+  const list = Array.isArray(activeJobs) ? activeJobs : (activeJobs && activeJobs.items ? activeJobs.items : []);
+  const badge = $("#active-tasks-badge");
+  if (badge) badge.textContent = `${list.length} تسک`;
+  const container = $("#overview-active-tasks");
+  if (!container) return;
+  if (!list.length) {
+    container.innerHTML = '<div class="empty">هیچ کاری در حال پردازش نیست</div>';
+    return;
+  }
+  container.innerHTML = list.map(j => {
+    const pct = Math.round(j.progress_pct !== undefined ? j.progress_pct : (j.progress || 0));
+    const name = j.file_name || j.name || j.fname || "بدون نام";
+    const jid = j.jid || (j.id ? String(j.id).slice(0, 8) : "");
+    const profile = j.profile || "default";
+    const stage = j.stage || (pct > 0 ? "در حال فشرده‌سازی" : "در صف پردازش");
+    return `
+      <div style="padding:10px 12px;margin-bottom:8px;background:var(--card-hover);border-radius:10px;border:1px solid var(--border)">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-weight:600;font-size:0.9rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70%">${esc(name)}</span>
+          <span class="badge" style="background:rgba(232,86,42,0.15);color:var(--acc);border-color:rgba(232,86,42,0.3)">${esc(profile)}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:0.8rem;color:var(--ink-mut);margin-bottom:6px">
+          <span class="mono">#${esc(jid)} · ${esc(stage)}</span>
+          <span><bdi dir="ltr">${pct}%</bdi></span>
+        </div>
+        <div class="prog-bar" style="width:100%;height:6px;margin:0"><span style="width:${pct}%"></span></div>
+      </div>
+    `;
+  }).join("");
+}
+
 /* Overview and KPIs */
 async function loadOverview() {
   try {
-    const [summary, metrics, services] = await Promise.all([
+    const [summary, metrics, services, activeJobs] = await Promise.all([
       api("/panel/api/summary").catch(() => ({})),
       api("/panel/api/server/metrics").catch(() => ({})),
-      api("/panel/api/services").catch(() => ({}))
+      api("/panel/api/services").catch(() => ({})),
+      api("/panel/api/active").catch(() => ([]))
     ]);
 
     // KPI values
@@ -1198,26 +1294,37 @@ async function loadOverview() {
     $("#kpi-failed").textContent = fa(c.failed || 0);
 
     if (metrics.disk) {
-      $("#kpi-disk").textContent = `${fa(metrics.disk.free_gb)} GB آزاد`;
-      $("#kpi-disk-sub").textContent = `از ${fa(metrics.disk.total_gb)} GB (${fa(metrics.disk.used_percent)}٪ مصرف)`;
+      $("#kpi-disk").innerHTML = `<bdi dir="ltr">${fa(metrics.disk.free_gb)} GB</bdi> آزاد`;
+      $("#kpi-disk-sub").innerHTML = `از <bdi dir="ltr">${fa(metrics.disk.total_gb)} GB</bdi> (<bdi dir="ltr">${fa(metrics.disk.used_percent)}%</bdi> مصرف)`;
     }
     if (metrics.memory) {
-      $("#kpi-ram").textContent = `${fa(metrics.memory.percent)}٪`;
-      $("#kpi-ram-sub").textContent = `${fa(metrics.memory.used_mb)} MB از ${fa(metrics.memory.total_mb)} MB`;
+      $("#kpi-ram").innerHTML = `<bdi dir="ltr">${fa(metrics.memory.percent)}%</bdi>`;
+      $("#kpi-ram-sub").innerHTML = `<bdi dir="ltr">${fa(metrics.memory.used_mb)} MB / ${fa(metrics.memory.total_mb)} MB</bdi>`;
     }
     if (metrics.cpu) {
-      $("#kpi-cpu").textContent = `${fa(metrics.cpu.percent)}٪ (${metrics.cpu.count} Core)`;
+      $("#kpi-cpu").innerHTML = `<bdi dir="ltr">${fa(metrics.cpu.percent)}%</bdi> <span style="font-size:0.85em">(${metrics.cpu.count} Core)</span>`;
     }
     if (metrics.uptime) {
       $("#kpi-uptime").textContent = `آپ‌تایم: ${fa(metrics.uptime.days)} روز و ${fa(metrics.uptime.hours)} ساعت`;
     }
 
     // Badge states
-    if (services.access_mode) {
-      $("#badge-access").textContent = services.access_mode === "private" ? "🔒 خصوصی" : "🌐 عمومی";
+    if (services.access_mode != null) {
+      const mode = String(services.access_mode).replace(/"/g, "").trim();
+      const badge = $("#badge-access");
+      if (badge) {
+        badge.innerHTML = mode === "private" ?
+          '<svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> خصوصی' :
+          '<svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg> عمومی';
+      }
     }
     if (services.paused != null) {
-      $("#badge-intake").textContent = services.paused ? "⏸ پذیرش متوقف" : "▶️ پذیرش فعال";
+      const badge = $("#badge-intake");
+      if (badge) {
+        badge.innerHTML = services.paused ?
+          '<svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><rect width="4" height="16" x="6" y="4"/><rect width="4" height="16" x="14" y="4"/></svg> پذیرش متوقف' :
+          '<svg class="ico" viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" stroke-width="2" fill="none"><polygon points="6 3 20 12 6 21 6 3"/></svg> پذیرش فعال';
+      }
     }
 
     // Services list
@@ -1230,11 +1337,14 @@ async function loadOverview() {
       </div>
     `).join("") || '<div class="empty">موردی یافت نشد</div>';
 
+    // Populate active tasks in overview
+    renderActiveTasks(activeJobs);
+
     // Recent events
     const auditData = await api("/panel/api/audit?limit=7").catch(() => ({ items: [] }));
     const rows = (auditData.items || []).map(e => `
       <tr>
-        <td class="mono">${esc((e.ts||"").replace("T"," ").slice(5,19))}</td>
+        <td class="mono"><bdi dir="ltr">${esc((e.ts||"").replace("T"," ").slice(5,19))}</bdi></td>
         <td><b>${esc(e.actor)}</b></td>
         <td><span class="badge">${esc(e.action)}</span></td>
         <td class="mono">${esc(e.target || "—")}</td>
@@ -1253,8 +1363,21 @@ async function loadTasks() {
   const status = $("#task-filter-status").value;
   const q = $("#task-filter-q").value.trim();
   try {
-    const data = await api(`/panel/api/jobs?view=${status}&q=${encodeURIComponent(q)}&limit=50`);
-    const items = data.items || [];
+    const p = new URLSearchParams();
+    if (status && status !== "all") {
+      p.set("status", status);
+      p.set("view", status);
+    }
+    if (q) p.set("q", q);
+    p.set("limit", "50");
+
+    let data;
+    try {
+      data = await api(`/panel/api/jobs?${p.toString()}`);
+    } catch (_) {
+      data = await api(`/panel/api/v3/jobs?${p.toString()}`);
+    }
+    const items = Array.isArray(data) ? data : (data.items || []);
     $("#tab-cnt-active").textContent = items.length;
 
     if (!items.length) {
@@ -1262,23 +1385,40 @@ async function loadTasks() {
       return;
     }
 
+    const stMap = {
+      processing: "در حال پردازش",
+      queued: "در صف انتظار",
+      completed: "تکمیل شده",
+      failed: "خطادار / ناموفق",
+      cancelled: "لغو شده"
+    };
+
     const rows = items.map(t => {
-      const pct = t.progress_pct || 0;
+      const id = t.id || t.job_id || "";
+      const jid = t.jid || (typeof id === 'string' ? id.slice(0, 8) : id);
+      const name = t.file_name || t.target_name || t.fname || "بدون نام";
+      const user = (t.first_name || t.user || "") + (t.username ? ` (@${t.username})` : "") || (t.user_id ? String(t.user_id) : (t.tg ? String(t.tg) : "—"));
+      const st = t.status || "queued";
+      const stLabel = t.status_fa || stMap[st] || st;
+      const pct = Math.round(t.progress_pct !== undefined ? t.progress_pct : (t.progress || 0));
+      const sizeStr = t.size_human || (t.source_size ? fmtBytes(t.source_size) : "—");
+      const timeStr = (t.created_at || t.enqueued_at || "").slice(0, 19).replace("T", " ");
+      const canCancel = st === "processing" || st === "queued";
+
       return `
         <tr class="clickable">
-          <td class="mono">#${esc(t.id)}</td>
-          <td><b>${esc(t.file_name || t.target_name || "بدون نام")}</b></td>
-          <td class="mono">${esc(t.user_id || "—")}</td>
+          <td class="mono">#${esc(jid)}</td>
+          <td><b>${esc(name)}</b></td>
+          <td class="mono">${esc(user)}</td>
           <td>
-            <span class="pill p-${esc(t.status || 'queue')}">${esc(t.status_fa || t.status)}</span>
-            ${t.status === 'processing' ? `<div class="prog-bar"><span style="width:${pct}%"></span></div> ${pct}٪` : ''}
+            <span class="pill p-${esc(st)}">${esc(stLabel)}</span>
+            ${st === 'processing' ? `<div class="prog-bar"><span style="width:${pct}%"></span></div> <bdi dir="ltr">${pct}%</bdi>` : ''}
           </td>
-          <td><span class="badge">${esc(t.preset || "default")}</span></td>
-          <td class="mono">${esc(t.size_human || "—")}</td>
-          <td class="mono">${esc((t.created_at || "").slice(0, 19).replace("T", " "))}</td>
+          <td><span class="badge">${esc(t.preset || t.profile || "default")}</span></td>
+          <td class="mono"><bdi dir="ltr">${esc(sizeStr)}</bdi></td>
+          <td class="mono"><bdi dir="ltr">${esc(timeStr)}</bdi></td>
           <td>
-            ${t.status === 'processing' || t.status === 'queued' ?
-              `<button class="btn danger" onclick="cancelJob('${esc(t.id)}')">لغو</button>` : '—'}
+            ${canCancel ? `<button class="btn danger" onclick="cancelJob('${esc(id)}')">لغو</button>` : '—'}
           </td>
         </tr>
       `;
@@ -1770,7 +1910,8 @@ $("#btn-toggle-access").onclick = async () => {
   if (!confirm("آیا حالت دسترسی ربات (Public / Private) تغییر داده شود؟")) return;
   try {
     const cfg = await api("/panel/api/bot/config");
-    const nextMode = cfg.access_mode === "private" ? "public" : "private";
+    const currentMode = String(cfg.access_mode || "private").replace(/"/g, "").trim();
+    const nextMode = currentMode === "private" ? "public" : "private";
     await api("/panel/api/bot/config", {
       method: "POST",
       body: JSON.stringify({ access_mode: nextMode })
@@ -1812,6 +1953,33 @@ $("#btn-logout").onclick = async () => {
   location.reload();
 };
 
+/* Wire Refresh and Filter Buttons */
+$("#btn-refresh-svc")?.addEventListener("click", () => loadOverview());
+$("#btn-task-refresh")?.addEventListener("click", () => loadTasks());
+$("#btn-refresh-docker")?.addEventListener("click", () => loadDocker());
+$("#btn-refresh-tables")?.addEventListener("click", () => loadDbTables());
+$("#btn-audit-refresh")?.addEventListener("click", () => loadAudit());
+
+/* Wire Enter key listeners */
+$("#task-filter-q")?.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    loadTasks();
+  }
+});
+$("#user-search-input")?.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    loadBotUsers();
+  }
+});
+$("#files-current-path")?.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    loadFiles($("#files-current-path").value.trim());
+  }
+});
+
 /* WebSocket Live Connection */
 let ws = null;
 function initLiveWs() {
@@ -1819,8 +1987,10 @@ function initLiveWs() {
   try {
     ws = new WebSocket(`${proto}//${location.host}/panel/ws`);
     ws.onopen = () => {
-      $("#dot-ws").classList.remove("off");
-      $("#badge-ws").textContent = "لایو (WebSocket)";
+      const dot = $("#dot-ws");
+      if (dot) dot.classList.remove("off");
+      const txt = $("#text-ws");
+      if (txt) txt.textContent = " لایو (WebSocket)";
     };
     ws.onmessage = ev => {
       try {
@@ -1829,12 +1999,19 @@ function initLiveWs() {
           const c = d.summary.counters || {};
           $("#kpi-active").textContent = fa(c.active || 0);
           $("#kpi-queue").textContent = fa(c.queued || 0);
+          if (c.completed != null) $("#kpi-completed").textContent = fa(c.completed);
+          if (c.failed != null) $("#kpi-failed").textContent = fa(c.failed);
+        }
+        if (d.active && currentTab === "overview") {
+          renderActiveTasks(d.active);
         }
       } catch (err) {}
     };
     ws.onclose = () => {
-      $("#dot-ws").classList.add("off");
-      $("#badge-ws").textContent = "پولینگ (پسیو)";
+      const dot = $("#dot-ws");
+      if (dot) dot.classList.add("off");
+      const txt = $("#text-ws");
+      if (txt) txt.textContent = " پولینگ (پسیو)";
       setTimeout(initLiveWs, 6000);
     };
   } catch (e) {

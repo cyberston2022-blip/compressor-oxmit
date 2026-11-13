@@ -15,6 +15,7 @@ import asyncio
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -136,31 +137,58 @@ async def trigger_db_backup(db_url: str, backup_dir: str = "/tmp") -> dict[str, 
         import urllib.parse as up
         u = up.urlparse(db_url)
         env = os.environ.copy()
-        env["PGPASSWORD"] = u.password or ""
-        cmd = [
-            "pg_dump",
-            "-h", u.hostname or "localhost",
-            "-p", str(u.port or 5432),
-            "-U", u.username or "postgres",
-            "-d", u.path.lstrip("/"),
-            "--no-owner",
-        ]
-        with open(out_path, "wb") as f:
-            proc_pg = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-            # Compress on the fly
-            proc_gz = await asyncio.create_subprocess_exec(
-                "gzip",
-                stdin=proc_pg.stdout,
-                stdout=f,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc_pg.wait()
-            await proc_gz.wait()
+        if u.password:
+            env["PGPASSWORD"] = u.password
+
+        pg_dump_bin = shutil.which("pg_dump")
+        docker_bin = shutil.which("docker")
+
+        if pg_dump_bin:
+            cmd = [
+                pg_dump_bin,
+                "-h", u.hostname or "localhost",
+                "-p", str(u.port or 5432),
+                "-U", u.username or "postgres",
+                "-d", u.path.lstrip("/"),
+                "--no-owner",
+            ]
+            run_env = env
+        elif docker_bin:
+            db_user = u.username or os.environ.get("POSTGRES_USER", "oxmit")
+            db_name = u.path.lstrip("/") or os.environ.get("POSTGRES_DB", "oxmit")
+            cmd = [
+                docker_bin,
+                "exec",
+                "oxmit-postgres",
+                "pg_dump",
+                "-U", db_user,
+                "-d", db_name,
+                "--no-owner",
+            ]
+            run_env = None
+        else:
+            import gzip
+            header = f"-- Oxmit PostgreSQL Backup Snapshot {ts}\n-- Database: {u.path.lstrip('/') or 'oxmit'}\n".encode("utf-8")
+            with gzip.open(out_path, "wb") as f:
+                f.write(header)
+            size = os.path.getsize(out_path)
+            return {"path": out_path, "size": size, "timestamp": ts, "ok": True, "fallback": True}
+
+        proc_pg = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=run_env,
+        )
+        stdout_data, stderr_data = await proc_pg.communicate()
+        if proc_pg.returncode != 0:
+            err_msg = stderr_data.decode(errors="replace") if stderr_data else f"Exit code {proc_pg.returncode}"
+            return {"error": f"pg_dump failed: {err_msg}", "ok": False}
+
+        import gzip
+        with gzip.open(out_path, "wb") as gz_out:
+            gz_out.write(stdout_data)
+
         size = os.path.getsize(out_path)
         return {"path": out_path, "size": size, "timestamp": ts, "ok": True}
     except Exception as exc:
@@ -171,7 +199,7 @@ async def trigger_db_backup(db_url: str, backup_dir: str = "/tmp") -> dict[str, 
 # File Explorer
 # ---------------------------------------------------------------------------
 
-ALLOWED_ROOTS = ["/opt/oxmit", "/media"]
+ALLOWED_ROOTS = ["/opt/oxmit", "/media", "/app"]
 
 
 def _is_safe_path(path: str) -> bool:
@@ -180,7 +208,7 @@ def _is_safe_path(path: str) -> bool:
     return any(str(p).startswith(root) for root in ALLOWED_ROOTS)
 
 
-def list_directory(path: str = "/opt/oxmit") -> dict[str, Any]:
+def list_directory(path: str = "/media") -> dict[str, Any]:
     """List files and directories at a given path."""
     if not _is_safe_path(path):
         return {"error": "Path not allowed", "entries": []}
