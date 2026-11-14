@@ -533,13 +533,17 @@ class QueueMixin:
         return claimed
 
     async def _claim_next(self, reserve_bytes: int):
-        """Atomic FIFO claim with per-user fairness.
+        """Atomic FIFO claim with per-user fairness and anti-starvation aging.
 
         Users that already have a job in an encode slot sort behind users
         that have none, so one heavy submitter cannot occupy every worker
         while others wait; with no one else waiting, spare capacity is still
         used. SKIP LOCKED + the status predicate make double-claims
         impossible, also across several processes/servers.
+
+        Aging (V3 §12.1): effective priority gains +5 per waiting hour, capped
+        at +15, so a job that has waited ~3h outranks a freshly-submitted
+        higher-priority job — no user/tier can starve indefinitely.
         """
         return await self.db.fetchrow(
             """
@@ -556,7 +560,11 @@ class QueueMixin:
                            WHERE a.requester_tg_id = j.requester_tg_id
                              AND a.status = 'processing'
                              AND a.stage = ANY($4::text[])),
-                         j.priority DESC, j.enqueued_at
+                         j.priority
+                           + LEAST(15, FLOOR(EXTRACT(EPOCH FROM
+                                 (now() - j.enqueued_at)) / 3600.0) * 5)::int
+                           DESC,
+                         j.enqueued_at
                 FOR UPDATE SKIP LOCKED
                 LIMIT 1)
               AND status = 'queued'

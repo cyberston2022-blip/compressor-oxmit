@@ -1109,6 +1109,7 @@ class JobEngine(QueueMixin):
             log.warning("archive message missing on reuse",
                         extra={"detail": str(archive_id)})
 
+        uncertain = method == "sent_unknown"
         await self.db.execute(
             """
             INSERT INTO deliveries(archive_id, job_id, tg_id, chat_id, message_id,
@@ -1116,9 +1117,13 @@ class JobEngine(QueueMixin):
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
             """,
             archive_id, _as_uuid(job_id), tg_id, chat_id, delivered_msg, method,
-            "ok" if ok else "failed", None if ok else "all delivery methods failed",
+            "unknown" if uncertain else ("ok" if ok else "failed"),
+            None if ok else "all delivery methods failed",
         )
-        await self.db.bump("deliveries_ok" if ok else "deliveries_failed")
+        if uncertain:
+            await self.db.bump("deliveries_unknown")
+        else:
+            await self.db.bump("deliveries_ok" if ok else "deliveries_failed")
         if chat_id is not None and pref.get("notify_done", True):
             if ok:
                 await self.edit_status_sync(chat_id, status_msg_id,
@@ -2680,10 +2685,16 @@ class JobEngine(QueueMixin):
                        archive=str(archive_row["id"])[:8])
                 )
                 archive_row = None
-            await self.db.execute(
-                "UPDATE job_requesters SET delivered = TRUE WHERE job_id = $1 AND tg_id = $2",
-                row["id"], r["tg_id"],
-            )
+            # sent_unknown (network ambiguity): the send MAY have reached
+            # Telegram. Keep delivered=FALSE so redelivery stays possible,
+            # record an explicit unknown row, and skip the archive-missing
+            # checks (they assume a definitive result).
+            uncertain = method == "sent_unknown"
+            if not uncertain:
+                await self.db.execute(
+                    "UPDATE job_requesters SET delivered = TRUE WHERE job_id = $1 AND tg_id = $2",
+                    row["id"], r["tg_id"],
+                )
             await self.db.execute(
                 """
                 INSERT INTO deliveries(archive_id, job_id, tg_id, chat_id, message_id,
@@ -2691,9 +2702,13 @@ class JobEngine(QueueMixin):
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                 """,
                 archive_id, row["id"], r["tg_id"], r["chat_id"], mid, method,
-                "ok" if ok else "failed", None if ok else "all delivery methods failed",
+                "unknown" if uncertain else ("ok" if ok else "failed"),
+                None if ok else "all delivery methods failed",
             )
-            await self.db.bump("deliveries_ok" if ok else "deliveries_failed")
+            if uncertain:
+                await self.db.bump("deliveries_unknown")
+            else:
+                await self.db.bump("deliveries_ok" if ok else "deliveries_failed")
             if not pref.get("notify_done", True):
                 continue
             if not ok:
@@ -2786,6 +2801,7 @@ class JobEngine(QueueMixin):
                     file_id=out_asset["tg_file_id"],
                     as_document=pref.get("delivery_style") == "doc",
                 )
+        uncertain = method == "sent_unknown"
         await self.db.execute(
             """
             INSERT INTO deliveries(archive_id, job_id, tg_id, chat_id, message_id,
@@ -2793,8 +2809,18 @@ class JobEngine(QueueMixin):
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
             """,
             archive_row["id"] if archive_row else None, job["id"], tg_id, chat_id, mid,
-            method, "ok" if ok else "failed", None if ok else "redelivery failed",
+            method, "unknown" if uncertain else ("ok" if ok else "failed"),
+            None if ok else "redelivery failed",
         )
+        if uncertain:
+            await self.db.bump("deliveries_unknown")
+        else:
+            await self.db.bump("deliveries_ok" if ok else "deliveries_failed")
+        if ok:
+            await self.db.execute(
+                "UPDATE job_requesters SET delivered = TRUE WHERE job_id = $1 AND tg_id = $2",
+                job["id"], tg_id,
+            )
         await self.db.bump("deliveries_ok" if ok else "deliveries_failed")
         return ok, method
 

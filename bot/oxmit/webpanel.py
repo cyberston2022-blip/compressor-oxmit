@@ -32,7 +32,7 @@ from . import audit as audit_mod
 from . import dashboard as dashboard_mod
 from . import media as media_mod
 from . import dashboard_page
-from .log import get_logger
+from .log import get_logger, recent_logs
 from .panel.security import (
     _sign,
     _check_cookie,
@@ -133,6 +133,30 @@ def login_allowed(attempts: deque, locked_until: float) -> tuple[bool, float]:
     while attempts and now - attempts[0] > LOGIN_WINDOW_S:
         attempts.popleft()
     return len(attempts) < LOGIN_MAX_ATTEMPTS, 0.0
+
+
+# pure helper (unit-tested): logs explorer filter (V3 §10.7 lite)
+_LOG_LEVEL_ORDER = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
+
+
+def filter_log_entries(entries: list[dict], level: str = "INFO",
+                       q: str = "", tail: int = 200) -> list[dict]:
+    """Filter structured log entries: minimum level + substring search over
+    msg/logger/job_id, newest-first, capped at `tail`. Pure — no I/O; the
+    entries are already redacted at their source (media.redact / log.py).
+    """
+    min_no = _LOG_LEVEL_ORDER.get((level or "INFO").upper(), 20)
+    q_low = (q or "").lower()
+    matched = [
+        e for e in entries
+        if _LOG_LEVEL_ORDER.get(e.get("level", "INFO"), 20) >= min_no
+        and (not q_low
+             or q_low in str(e.get("msg", "")).lower()
+             or q_low in str(e.get("job_id", "")).lower()
+             or q_low in str(e.get("logger", "")).lower())
+    ]
+    matched = matched[-max(1, min(int(tail or 200), 1000)):]
+    return list(reversed(matched))
 
 
 # pure helper (unit-tested): global (all-IP) lockout layer
@@ -705,6 +729,28 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
                 "current": s is _session(request)} for sid, s in sessions.items()]
         return _json({"items": out})
 
+    # ---- logs explorer (bot-process ring buffer; V3 §10.7 lite) ----
+    async def logs_view(request: web.Request) -> web.Response:
+        """GET /panel/api/logs?level=&q=&tail= — newest-first filtered view
+        of the bot process's own structured logs. Owner-only. Entries are
+        redacted at their source; worker/Encore/PG logs are not included
+        (documented limitation — they live in other containers)."""
+        session = get_session(request)
+        cfg_owner = getattr(cfg, "owner_telegram_id", None)
+        if not session or not is_owner_session(session, cfg_owner):
+            return _json({"error": "Forbidden: Owner access required"}, 403)
+        try:
+            tail = min(max(int(request.query.get("tail", "200")), 1), 1000)
+        except (TypeError, ValueError):
+            tail = 200
+        items = filter_log_entries(
+            recent_logs(),
+            level=request.query.get("level", "INFO"),
+            q=request.query.get("q", ""),
+            tail=tail,
+        )
+        return _json({"items": items})
+
     # ---- write APIs (session + CSRF + audit) ----
     async def job_action(request: web.Request) -> web.Response:
         session = _post_session(request)
@@ -1216,6 +1262,7 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
     app.router.add_get("/panel/api/v3/jobs", require_owner(jobs))
     app.router.add_get("/panel/api/audit", require_owner(audit_list))
     app.router.add_get("/panel/api/sessions", require_owner(sessions_list))
+    app.router.add_get("/panel/api/logs", require_owner(logs_view))
     app.router.add_post("/panel/api/sessions/revoke", require_owner(session_revoke))
     app.router.add_get("/panel/api/services", require_owner(services))
 

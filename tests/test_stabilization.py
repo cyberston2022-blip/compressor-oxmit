@@ -363,3 +363,273 @@ def test_predict_ratio_validation_bounds():
     assert any("PREDICT_NO_GAIN_RATIO" in e for e in errs)
     good = Settings(predict_no_gain_ratio=0.98)
     assert all("PREDICT_NO_GAIN_RATIO" not in e for e in good.validate())
+
+
+# ---------------------------------------------------------------------------
+# FIX-7 integration: _deliver_source must record the delivery for the
+# requester (regression: production run left job_requesters.delivered=false
+# and no deliveries row)
+# ---------------------------------------------------------------------------
+
+class SourceDeliveryStubBot:
+    def __init__(self):
+        self.calls = []
+
+    async def send_video(self, **kw):
+        self.calls.append(("send_video", kw.get("chat_id")))
+        return SimpleNamespace(message_id=999)
+
+    async def send_document(self, **kw):
+        self.calls.append(("send_document", kw.get("chat_id")))
+        return SimpleNamespace(message_id=998)
+
+    async def send_message(self, **kw):
+        self.calls.append(("send_message", kw.get("chat_id")))
+        return SimpleNamespace(message_id=997)
+
+    async def edit_message_text(self, **kw):
+        self.calls.append(("edit", kw.get("chat_id")))
+        return SimpleNamespace(message_id=1)
+
+
+async def test_deliver_source_records_delivery(engine, fake_db, tmp_path):
+    engine.bot = SourceDeliveryStubBot()
+    jid = "dddddddd-0000-0000-0000-000000000009"
+    media_id = "eeeeeeee-0000-0000-0000-000000000009"
+
+    job_row = {
+        "id": jid, "status": "completed", "stage": "completed",
+        "profile": "edu480", "effective_profile": "edu480",
+        "requester_tg_id": 829999317, "media_id": media_id,
+        "source_size": 5000, "output_size": 5000, "source_path": None,
+        "started_at": None, "completed_at": None,
+        "is_no_gain": True, "archived": False, "progress": 100,
+        "source_duration": 60.0, "tg_file_id": "src-file-id",
+        "m_sha": "s" * 64, "output_name": "v", "source_filename": "v.mp4",
+        "personal_thumb_path": None, "personal_caption": None,
+        "caption_mode": "replace", "watermark_json": None,
+        "chat_id": 829999317, "status_message_id": 42,
+        "reuse_of": None,
+    }
+    fake_db.on_fetchval(lambda sql: "status = 'processing' RETURNING" in sql, jid)
+    # _job_card_row (push_stage_card) has its own column aliases — match it
+    # BEFORE the generic job-row predicate:
+    fake_db.on_fetchrow(lambda sql: "m.duration_s AS m_duration" in sql,
+                        {"id": jid, "stage": "completed", "status": "completed",
+                         "output_name": "v", "source_filename": "v.mp4",
+                         "source_size": 5000, "output_size": 5000,
+                         "m_duration": 60.0, "m_w": 640, "m_h": 480,
+                         "m_fps": 30.0, "m_vcodec": "h264", "m_acodec": "aac",
+                         "m_bitrate": 800000, "chat_id": 829999317,
+                         "tg_id": 829999317, "status_message_id": 42,
+                         "delivered": False, "media_id": media_id})
+    fake_db.on_fetchrow(lambda sql: "FROM jobs j" in sql and "JOIN media_assets" in sql,
+                        job_row)
+    fake_db.on_fetchrow(lambda sql: "SELECT language, delivery_style" in sql,
+                        {"language": "fa", "delivery_style": "video",
+                         "notify_done": True, "show_meta": True,
+                         "thumbnail_file_id": None})
+    fake_db.on_fetchrow(lambda sql: "SELECT probe, width" in sql,
+                        {"probe": None, "width": 640, "height": 480,
+                         "duration_s": 60.0, "vcodec": "h264", "acodec": "aac"})
+    fake_db.on_fetchrow(lambda sql: "SELECT tg_file_id FROM media_assets" in sql,
+                        {"tg_file_id": "out-file-id"})
+    fake_db.on_fetchrow(lambda sql: "SELECT tg_file_id, width, height" in sql,
+                        {"tg_file_id": "src-file-id", "width": 640, "height": 480,
+                         "duration_s": 60.0, "vcodec": "h264", "acodec": "aac",
+                         "probe": None})
+    fake_db.on_fetch(lambda sql: "FROM job_requesters" in sql,
+                     [{"tg_id": 829999317, "chat_id": 829999317,
+                       "status_message_id": 42, "delivered": False}])
+    fake_db.on_fetchval(lambda sql: "SELECT language FROM users" in sql, "fa")
+
+    probe = {"width": 640, "height": 480, "duration_s": 60.0, "fps": 30.0,
+             "vcodec": "h264", "acodec": "aac"}
+    await engine._deliver_source(jid, tmp_path / "src.mp4", probe)
+
+    sends = [c[0] for c in engine.bot.calls]
+    assert "send_video" in sends, f"source must be delivered to the requester, got {sends}"
+    assert any(e[1] == "deliveries_ok" for e in fake_db.bumps())
+    assert any("INSERT INTO deliveries" in e[1] for e in fake_db.executed)
+    assert any("UPDATE job_requesters SET delivered = TRUE" in e[1]
+               for e in fake_db.executed)
+
+
+# ---------------------------------------------------------------------------
+# IMP-1 (Master Vision §9.3): network-ambiguous deliveries are recorded as
+# sent_unknown — never silently mislabeled as failed, never auto-retried
+# ---------------------------------------------------------------------------
+
+class TimeoutBot:
+    """Bot stub whose send raises asyncio.TimeoutError (ambiguous outcome)."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def send_video(self, **kw):
+        self.calls.append("send_video")
+        raise asyncio.TimeoutError()
+
+    async def send_document(self, **kw):
+        self.calls.append("send_document")
+        raise asyncio.TimeoutError()
+
+    async def copy_message(self, **kw):
+        self.calls.append("copy_message")
+        raise asyncio.TimeoutError()
+
+    async def edit_message_text(self, **kw):
+        self.calls.append("edit_message_text")
+        return SimpleNamespace(message_id=1)
+
+    async def send_document(self, **kw):
+        self.calls.append("send_document")
+        raise asyncio.TimeoutError()
+
+
+async def test_deliver_result_timeout_returns_sent_unknown(engine):
+    engine.bot = TimeoutBot()
+    ok, method, mid = await archive_mod.deliver_result(
+        engine, chat_id=100, file_id="some-file-id")
+    assert ok is False
+    assert method == "sent_unknown"
+    assert mid is None
+
+
+async def test_deliver_to_requesters_records_unknown_state(engine, fake_db):
+    engine.bot = TimeoutBot()
+    jid = "dddddddd-0000-0000-0000-000000000010"
+    media_id = "eeeeeeee-0000-0000-0000-000000000010"
+    job_row = {
+        "id": jid, "status": "completed", "stage": "completed",
+        "profile": "edu480", "effective_profile": "edu480",
+        "requester_tg_id": 7, "media_id": media_id,
+        "source_size": 5000, "output_size": 4000, "source_path": None,
+        "started_at": None, "completed_at": None,
+        "is_no_gain": False, "archived": True, "progress": 100,
+        "source_duration": 60.0, "reuse_of": None, "new": True,
+        "output_name": "v", "source_filename": "v.mp4",
+        "personal_thumb_path": None, "personal_caption": None,
+        "caption_mode": "replace", "watermark_json": None,
+        "chat_id": 7, "status_message_id": 42,
+    }
+    fake_db.on_fetchval(lambda sql: "FROM archive_records ar" in sql, None)
+    fake_db.on_fetchrow(lambda sql: "SELECT * FROM archive_records" in sql,
+                        {"id": "aaaaaaaa-0000-0000-0000-000000000000",
+                         "source_media_id": media_id, "output_media_id": "oooo-0000",
+                         "channel_id": -100123, "message_id": 77, "status": "active",
+                         "profile": "edu480", "profile_version": 2,
+                         "output_tg_file_id": "ofid"})
+    fake_db.on_fetchrow(lambda sql: "SELECT tg_file_id FROM media_assets" in sql,
+                        {"tg_file_id": "out-file-id"})
+    fake_db.on_fetchrow(lambda sql: "SELECT language, delivery_style" in sql,
+                        {"language": "fa", "delivery_style": "video",
+                         "notify_done": True, "show_meta": True,
+                         "thumbnail_file_id": None})
+    fake_db.on_fetchval(lambda sql: "SELECT language FROM users" in sql, "fa")
+    fake_db.on_fetchrow(lambda sql: "SELECT probe, width" in sql,
+                        {"probe": None, "width": 640, "height": 480,
+                         "duration_s": 60.0, "vcodec": "h264", "acodec": "aac"})
+    fake_db.on_fetch(lambda sql: "FROM job_requesters" in sql,
+                     [{"tg_id": 7, "chat_id": 7,
+                       "status_message_id": 42, "delivered": False}])
+
+    await engine._deliver_to_requesters(
+        job_row, "aaaaaaaa-0000-0000-0000-000000000000", media_id,
+        "out-file-id", out_size=4000,
+        out_probe={"width": 640, "height": 480, "duration_s": 60.0,
+                   "vcodec": "h264", "acodec": "aac"},
+    )
+
+    inserts = [e[2] for e in fake_db.executed if "INSERT INTO deliveries" in e[1]]
+    assert inserts, "uncertain delivery must still be recorded"
+    assert inserts[0][6] == "unknown"
+    assert any(e[1] == "deliveries_unknown" for e in fake_db.bumps()), \
+        "unknown outcome must use its own counter (never deliveries_failed)"
+    # delivered stays FALSE: redelivery remains possible
+    assert not any("delivered = TRUE" in e[1] for e in fake_db.executed)
+
+
+# ---------------------------------------------------------------------------
+# IMP-3 (Master Vision §10.7): in-process logs ring buffer + filter
+# ---------------------------------------------------------------------------
+
+def test_filter_log_entries_level_and_search():
+    from oxmit.webpanel import filter_log_entries
+    entries = [
+        {"ts": "t1", "level": "INFO", "logger": "oxmit.engine", "msg": "job completed"},
+        {"ts": "t2", "level": "ERROR", "logger": "oxmit.engine", "msg": "boom",
+         "job_id": "abcd1234"},
+        {"ts": "t3", "level": "DEBUG", "logger": "oxmit.engine", "msg": "noise"},
+        {"ts": "t4", "level": "WARNING", "logger": "oxmit.jobqueue", "msg": "hmm"},
+    ]
+    out = filter_log_entries(entries, level="WARNING", q="", tail=100)
+    assert [e["ts"] for e in out] == ["t4", "t2"]          # newest first, >=WARNING
+    out = filter_log_entries(entries, level="INFO", q="abcd1234", tail=100)
+    assert len(out) == 1 and out[0]["msg"] == "boom"        # job_id search
+    out = filter_log_entries(entries, level="INFO", q="", tail=2)
+    assert len(out) == 2 and out[0]["ts"] == "t4"           # tail cap, newest first
+
+
+def test_filter_log_entries_never_raises_on_garbage():
+    from oxmit.webpanel import filter_log_entries
+    out = filter_log_entries([{"level": "WEIRD", "msg": None}, {"oops": 1}],
+                             level="DEBUG", q="", tail=10)
+    assert isinstance(out, list)
+
+
+def test_ring_buffer_handler_caps_and_captures():
+    import logging as _logging
+    from oxmit.log import RingBufferHandler
+    h = RingBufferHandler(maxlen=3)
+    logger = _logging.Logger("ringtest")
+    logger.addHandler(h)
+    logger.setLevel(_logging.INFO)
+    for i in range(5):
+        logger.info("tick %d", i)
+    entries = list(h.buf)
+    assert len(entries) == 3                                # bounded
+    assert entries[-1]["msg"] == "tick 4"                   # newest kept
+    assert entries[0]["msg"] == "tick 2"                    # oldest evicted
+    rec_logger = _logging.Logger("ringtest.job", _logging.INFO)
+    rec_logger.propagate = False
+    rec_logger.addHandler(h)
+    rec_logger.info("with job", extra={"job_id": "abc"})
+    assert h.buf[-1].get("job_id") == "abc"                 # correlation captured
+
+
+# ---------------------------------------------------------------------------
+# IMP-4: redeliver records requester delivered flag
+# ---------------------------------------------------------------------------
+
+async def test_redeliver_marks_requester_delivered(engine, fake_db):
+    engine.bot = ReuseStubBot()
+    jid = "dddddddd-0000-0000-0000-000000000011"
+    fake_db.on_fetchrow(lambda sql: "FROM jobs WHERE id" in sql,
+                        {"id": jid, "status": "completed", "profile": "edu480",
+                         "effective_profile": "edu480", "reuse_of": None,
+                         "output_media_id": "eeeeeeee-0000-0000-0000-000000000002",
+                         "media_id": "bbbbbbbb-0000-0000-0000-000000000001",
+                         "is_no_gain": False, "source_path": None,
+                         "requester_tg_id": 7, "source_size": 5000,
+                         "started_at": None, "completed_at": None,
+                         "output_name": "v", "source_filename": "v.mp4"})
+    fake_db.on_fetchrow(lambda sql: "SELECT * FROM archive_records" in sql,
+                        {"id": "aaaaaaaa-0000-0000-0000-000000000000",
+                         "channel_id": -100123, "message_id": 77,
+                         "status": "active", "output_tg_file_id": "ofid"})
+    fake_db.on_fetchrow(lambda sql: "SELECT tg_file_id FROM media_assets" in sql,
+                        {"tg_file_id": "out-file-id"})
+    fake_db.on_fetchrow(lambda sql: "SELECT language, delivery_style" in sql,
+                        {"language": "fa", "delivery_style": "video",
+                         "notify_done": True, "show_meta": True,
+                         "thumbnail_file_id": None})
+    fake_db.on_fetchval(lambda sql: "SELECT language FROM users" in sql, "fa")
+
+    fake_db.on_fetchval(lambda sql: "FROM job_requesters WHERE" in sql, 1)
+    ok, method = await engine.redeliver(jid, 100, 7)
+    assert ok is True
+    delivered_updates = [e for e in fake_db.executed
+                         if "UPDATE job_requesters" in e[1] and "delivered = TRUE" in e[1]]
+    assert delivered_updates, "redeliver must mark the requester delivered"
+    assert delivered_updates[0][2][1:] == (7,)

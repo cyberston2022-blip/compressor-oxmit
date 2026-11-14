@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 from collections.abc import Awaitable, Callable
 
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramRetryAfter, TelegramForbiddenError
@@ -90,6 +91,11 @@ async def deliver_result(
     (an FSInputFile) only applies to the fresh local-upload branch - Telegram
     keeps the stored thumbnail for file_id re-sends.
     Returns (ok, method, telegram_message_id).
+
+    Uncertain outcomes (V3 §20): a timeout or connection error AFTER a
+    request may have been transmitted is NOT a definitive failure. Such
+    errors return ``(False, "sent_unknown", None)`` and callers must record
+    an unknown delivery state instead of blindly retrying (duplicate risk).
     """
     bot = engine.bot
     if archive_message_id and archive_channel_id and not as_document:
@@ -104,6 +110,10 @@ async def deliver_result(
                 caption=caption,
             ))
             return True, "copy", msg.message_id
+        except (asyncio.TimeoutError, ConnectionResetError, aiohttp.ClientError) as exc:
+            log.warning("delivery outcome unknown (network) [copy]",
+                        extra={"detail": str(exc)[:150]})
+            return False, "sent_unknown", None
         except (TelegramBadRequest, TelegramForbiddenError, TelegramAPIError) as exc:
             if _is_not_found(exc):
                 log.warning("archive message gone (copy)", extra={"detail": str(exc)[:150]})
@@ -124,6 +134,10 @@ async def deliver_result(
                     supports_streaming=supports_streaming,
                 ))
             return True, "doc_file_id" if as_document else "file_id", msg.message_id
+        except (asyncio.TimeoutError, ConnectionResetError, aiohttp.ClientError) as exc:
+            log.warning("delivery outcome unknown (network) [file_id]",
+                        extra={"detail": str(exc)[:150]})
+            return False, "sent_unknown", None
         except (TelegramBadRequest, TelegramForbiddenError, TelegramAPIError) as exc:
             log.info("file_id send failed", extra={"detail": str(exc)[:150]})
     if file_path:
@@ -141,6 +155,10 @@ async def deliver_result(
                     thumbnail=thumbnail,
                 ))
             return True, "doc_upload" if as_document else "upload", msg.message_id
+        except (asyncio.TimeoutError, ConnectionResetError, aiohttp.ClientError) as exc:
+            log.warning("delivery outcome unknown (network) [upload]",
+                        extra={"detail": str(exc)[:150]})
+            return False, "sent_unknown", None
         except (TelegramBadRequest, TelegramForbiddenError, TelegramAPIError) as exc:
             log.info("local upload failed", extra={"detail": str(exc)[:150]})
     return False, "none", None
