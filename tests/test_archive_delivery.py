@@ -103,3 +103,29 @@ async def test_deliver_result_as_document():
     assert method == "doc_file_id"
     assert mid == 777
     engine.bot.send_document.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deliver_result_passes_duration_and_dimensions():
+    engine = MagicMock()
+    msg = MagicMock()
+    msg.message_id = 888
+    engine.bot.send_video = AsyncMock(return_value=msg)
+
+    ok, method, mid = await deliver_result(
+        engine,
+        chat_id=123,
+        file_id="tg-file-123",
+        duration=45,
+        width=854,
+        height=480,
+    )
+    assert ok is True
+    assert method == "file_id"
+    assert mid == 888
+    engine.bot.send_video.assert_awaited_once()
+    kwargs = engine.bot.send_video.await_args.kwargs
+    assert kwargs.get("duration") == 45
+    assert kwargs.get("width") == 854
+    assert kwargs.get("height") == 480
+

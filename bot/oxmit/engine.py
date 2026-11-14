@@ -1315,11 +1315,14 @@ class JobEngine(QueueMixin):
                     raise merge_mod.MergeError(
                         "merged file exceeds the Telegram upload limit - "
                         "use merge+compress")
+                merged_probe = await media_mod.probe_video(out_path)
+                m_dur = int(round(merged_probe.get("duration_s") or 0)) if merged_probe.get("duration_s") else None
                 sent_ok = False
                 try:
                     await self.bot.send_video(
                         chat_id=chat_id, video=FSInputFile(str(out_path)),
                         caption=caption, supports_streaming=True,
+                        duration=m_dur, width=merged_probe.get("width"), height=merged_probe.get("height"),
                         thumbnail=thumb_file)
                     sent_ok = True
                 except TelegramAPIError as exc:
@@ -1328,7 +1331,6 @@ class JobEngine(QueueMixin):
                     if sent_ok:
                         await self.db.bump("merges_completed")
                 await merge_mod.finish_session(self.db, session_id, str(out_path))
-                merged_probe = await media_mod.probe_video(out_path)
                 summary = tr("mrg_done_summary", lang,
                              count=len(items),
                              dur=_fmt_clock(merged_probe.get("duration_s") or 0),
@@ -2050,9 +2052,11 @@ class JobEngine(QueueMixin):
             "UPDATE jobs SET stage = 'uploading', upload_started_at = now() WHERE id = $1",
             row["id"])
         await self.push_stage_card(job_id)
+        dur_val = int(round(out_probe.get("duration_s") or 0)) if out_probe.get("duration_s") else None
         try:
             sent = await self._archive_upload(
                 path=output_path, caption=caption, thumbnail=thumbnail,
+                duration=dur_val, width=out_probe.get("width"), height=out_probe.get("height"),
             )
         except TelegramAPIError as exc:
             # Delivery failure != encoding failure: keep the output and retry
@@ -2266,11 +2270,25 @@ class JobEngine(QueueMixin):
 
     async def _archive_upload(self, *, path: Path, caption: str,
                               thumbnail: FSInputFile | None,
+                              duration: int | None = None,
+                              width: int | None = None,
+                              height: int | None = None,
                               max_attempts: int = 3):
         """Upload a video to the archive channel with bounded concurrency and
         exponential-backoff retry on transient errors (pattern: ArgonsEncoder
         UploadManager, reimplemented for Bot API)."""
         last_exc: Exception | None = None
+        if not duration or not width or not height:
+            try:
+                p = await media_mod.probe_video(path)
+                if not duration and p.get("duration_s"):
+                    duration = int(round(p["duration_s"]))
+                if not width:
+                    width = p.get("width")
+                if not height:
+                    height = p.get("height")
+            except Exception:
+                pass
         if self.cfg.botapi_reads_media and str(path).startswith(self.cfg.media_root):
             # Local Bot API reads the file straight from the shared /media
             # mount: no multipart copy of a multi-GB body through the HTTP
@@ -2281,6 +2299,7 @@ class JobEngine(QueueMixin):
                     return await self.bot.send_video(
                         chat_id=self.state.archive_channel_id,
                         video=f"file://{path}", caption=caption,
+                        duration=duration, width=width, height=height,
                         supports_streaming=True, thumbnail=thumbnail)
             except TelegramAPIError as exc:
                 log.warning("file:// upload failed, falling back to multipart",
@@ -2292,6 +2311,7 @@ class JobEngine(QueueMixin):
                         chat_id=self.state.archive_channel_id,
                         video=FSInputFile(str(path)),
                         caption=caption,
+                        duration=duration, width=width, height=height,
                         supports_streaming=True,
                         thumbnail=thumbnail,
                     )
@@ -2308,6 +2328,7 @@ class JobEngine(QueueMixin):
                                 chat_id=self.state.archive_channel_id,
                                 video=FSInputFile(str(path)),
                                 caption=caption,
+                                duration=duration, width=width, height=height,
                                 supports_streaming=True,
                             )
                     except TelegramRetryAfter as exc:
@@ -2596,6 +2617,7 @@ class JobEngine(QueueMixin):
                         tr("status_done_nogain", lang),
                     )
                 else:
+                    dur_val = int(round(effective_probe.get("duration_s") or 0)) if effective_probe.get("duration_s") else None
                     ok, method, mid = await archive_mod.deliver_result(
                         self,
                         chat_id=r["chat_id"],
@@ -2606,6 +2628,9 @@ class JobEngine(QueueMixin):
                                    src=media_mod.human_size(source_size)),
                         as_document=pref.get("delivery_style") == "doc",
                         thumbnail=self._global_thumb(),
+                        duration=dur_val,
+                        width=effective_probe.get("width"),
+                        height=effective_probe.get("height"),
                     )
             else:
                 if part_ids:
@@ -2642,11 +2667,15 @@ class JobEngine(QueueMixin):
                             if wm_done:
                                 await self.db.bump("watermark_jobs")
                                 ok, method, mid = False, "none", None
+                                dur_val = int(round(effective_probe.get("duration_s") or 0)) if effective_probe.get("duration_s") else None
                                 try:
                                     msg = await self.bot.send_video(
                                         chat_id=r["chat_id"],
                                         video=FSInputFile(str(wm_path)),
                                         caption=caption,
+                                        duration=dur_val,
+                                        width=effective_probe.get("width"),
+                                        height=effective_probe.get("height"),
                                         supports_streaming=True,
                                         thumbnail=thumb_file,
                                     )
@@ -2672,14 +2701,22 @@ class JobEngine(QueueMixin):
                             except TelegramAPIError as exc:
                                 log.info("doc delivery failed, falling back",
                                          extra={"detail": str(exc)[:150]})
+                            dur_val = int(round(effective_probe.get("duration_s") or 0)) if effective_probe.get("duration_s") else None
                             if not ok:
                                 ok, method, mid = await self._deliver_archive_to(
                                     r["chat_id"], archive_row, pref,
-                                    caption=caption, thumbnail=thumb_file)
+                                    caption=caption, thumbnail=thumb_file,
+                                    duration=dur_val,
+                                    width=effective_probe.get("width"),
+                                    height=effective_probe.get("height"))
                         else:
+                            dur_val = int(round(effective_probe.get("duration_s") or 0)) if effective_probe.get("duration_s") else None
                             ok, method, mid = await self._deliver_archive_to(
                                 r["chat_id"], archive_row, pref,
-                                caption=caption, thumbnail=thumb_file)
+                                caption=caption, thumbnail=thumb_file,
+                                duration=dur_val,
+                                width=effective_probe.get("width"),
+                                height=effective_probe.get("height"))
             if (archive_row and archive_row["message_id"] and ok
                     and method in ("file_id", "upload")):
                 await self.db.execute(
@@ -2736,7 +2773,10 @@ class JobEngine(QueueMixin):
 
     async def _deliver_archive_to(self, chat_id: int, archive_row, pref: dict,
                                   caption: str | None = None,
-                                  thumbnail=None) -> tuple[bool, str, int | None]:
+                                  thumbnail=None,
+                                  duration: int | None = None,
+                                  width: int | None = None,
+                                  height: int | None = None) -> tuple[bool, str, int | None]:
         return await archive_mod.deliver_result(
             self,
             chat_id=chat_id,
@@ -2746,6 +2786,9 @@ class JobEngine(QueueMixin):
                      "output_tg_file_id" in archive_row.keys() else None),
             caption=caption,
             thumbnail=thumbnail,
+            duration=duration,
+            width=width,
+            height=height,
         )
 
     async def redeliver(self, job_id: str, chat_id: int, tg_id: int) -> tuple[bool, str]:

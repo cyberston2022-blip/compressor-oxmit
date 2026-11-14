@@ -20,9 +20,9 @@ encodes:
     params:
       crf: "#{profileParams['crf'] ?: '25'}"
       preset: "#{profileParams['preset'] ?: 'veryfast'}"
-      threads: "#{profileParams['threads'] ?: '3'}"
+      threads: "#{profileParams['threads'] ?: '4'}"
       aq-mode: "3"
-      rc-lookahead: "40"
+      rc-lookahead: "#{profileParams['rc_lookahead'] ?: '20'}"
       pix_fmt: yuv420p
       movflags: "+faststart"
     audioEncode:

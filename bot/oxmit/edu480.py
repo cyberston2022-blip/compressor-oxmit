@@ -142,13 +142,13 @@ def target_dims(width: int | None, height: int | None,
     return _even(width * scale), max_short
 
 
-def video_filters(probe: dict, max_fps: float) -> tuple[str, str]:
+def video_filters(probe: dict, max_fps: float, flags: str = "lanczos") -> tuple[str, str]:
     """(scale filter, fps filter) for Encore's ``filters`` list.
 
     ``null`` is FFmpeg's pass-through filter, used when nothing must change.
     """
     dims = target_dims(probe.get("width"), probe.get("height"))
-    vf = f"scale={dims[0]}:{dims[1]}:flags=lanczos" if dims else "null"
+    vf = f"scale={dims[0]}:{dims[1]}:flags={flags}" if dims else "null"
     fps = probe.get("fps") or 0
     try:
         fps = float(fps)
@@ -164,7 +164,8 @@ def _fmt_fps(v: float) -> str:
 
 def encode_params(probe: dict, cfg, threads: int) -> dict:
     """profileParams for the Encore ``edu480`` profile (all strings)."""
-    vf, fpsf = video_filters(probe, cfg.edu480_max_fps)
+    flags = getattr(cfg, "edu480_scale_flags", "lanczos")
+    vf, fpsf = video_filters(probe, cfg.edu480_max_fps, flags=flags)
     return {
         "crf": str(cfg.edu480_crf),
         "preset": cfg.edu480_preset,

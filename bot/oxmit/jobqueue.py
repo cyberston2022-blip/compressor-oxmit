@@ -896,7 +896,7 @@ class QueueMixin:
         others = int(await self.db.fetchval(
             "SELECT count(*) FROM jobs WHERE status = 'processing' AND stage = 'encoding'"
         ) or 0)
-        threads = self.cfg.ffmpeg_threads_single if (others == 0 and self.cfg.slots == 1) \
+        threads = self.cfg.ffmpeg_threads_single if others == 0 \
             else self.cfg.ffmpeg_threads_multi
         params = edu480.encode_params(probe, self.cfg, threads)
         input_params = None

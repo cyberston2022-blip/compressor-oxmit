@@ -163,6 +163,7 @@ class Settings:
     # ---- EDU480 (the single active compression profile) ----
     edu480_crf: int = 25
     edu480_preset: str = "veryfast"
+    edu480_scale_flags: str = "lanczos"
     edu480_max_fps: float = 30.0
     edu480_audio_kbps: int = 64
     # Predictive no-gain guard (deterministic bpp model, V3 §16): when the
@@ -293,6 +294,8 @@ class Settings:
         if self.edu480_preset not in ("ultrafast", "superfast", "veryfast", "faster",
                                       "fast", "medium"):
             errs.append(f"EDU480_PRESET={self.edu480_preset} is not an x264 preset")
+        if self.edu480_scale_flags not in ("lanczos", "bicubic", "bilinear", "fast_bilinear"):
+            errs.append(f"EDU480_SCALE_FLAGS={self.edu480_scale_flags} is not a valid scaling filter")
         if not 10 <= self.edu480_max_fps <= 60:
             errs.append(f"EDU480_MAX_FPS={self.edu480_max_fps} outside 10..60")
         if self.lease_minutes < 5:
@@ -432,6 +435,7 @@ def load_settings() -> Settings:
     s.support_session_min = _int("SUPPORT_SESSION_MIN", 10)
     s.edu480_crf = _int("EDU480_CRF", 25)
     s.edu480_preset = os.getenv("EDU480_PRESET", "veryfast").strip().lower()
+    s.edu480_scale_flags = os.getenv("EDU480_SCALE_FLAGS", "lanczos").strip().lower()
     s.edu480_max_fps = _float("EDU480_MAX_FPS", 30.0)
     s.edu480_audio_kbps = _int("EDU480_AUDIO_KBPS", 64)
     s.edu480_compliant_kbps = _int("EDU480_COMPLIANT_KBPS", 700)

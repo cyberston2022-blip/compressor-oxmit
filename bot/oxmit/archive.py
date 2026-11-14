@@ -82,6 +82,9 @@ async def deliver_result(
     supports_streaming: bool = True,
     as_document: bool = False,
     thumbnail=None,
+    duration: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> tuple[bool, str, int | None]:
     """Deliver a result to a chat. Never raises on Telegram errors.
 
@@ -131,6 +134,9 @@ async def deliver_result(
                     chat_id=chat_id,
                     video=file_id,
                     caption=caption,
+                    duration=duration,
+                    width=width,
+                    height=height,
                     supports_streaming=supports_streaming,
                 ))
             return True, "doc_file_id" if as_document else "file_id", msg.message_id
@@ -142,6 +148,17 @@ async def deliver_result(
             log.info("file_id send failed", extra={"detail": str(exc)[:150]})
     if file_path:
         try:
+            if not as_document and (not duration or not width or not height):
+                try:
+                    p = await media_mod.probe_video(file_path)
+                    if not duration and p.get("duration_s"):
+                        duration = int(round(p["duration_s"]))
+                    if not width:
+                        width = p.get("width")
+                    if not height:
+                        height = p.get("height")
+                except Exception:
+                    pass
             if as_document:
                 msg = await flood_safe(lambda: bot.send_document(
                     chat_id=chat_id, document=FSInputFile(file_path), caption=caption,
@@ -151,6 +168,9 @@ async def deliver_result(
                     chat_id=chat_id,
                     video=FSInputFile(file_path),
                     caption=caption,
+                    duration=duration,
+                    width=width,
+                    height=height,
                     supports_streaming=supports_streaming,
                     thumbnail=thumbnail,
                 ))
