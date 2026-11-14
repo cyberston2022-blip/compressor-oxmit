@@ -67,7 +67,7 @@ def test_filters_fps_cap_and_passthrough():
 def test_encode_params_are_strings_and_single_profile():
     cfg = Settings()
     p = edu480.encode_params({"width": 1280, "height": 720, "fps": 30}, cfg, 3)
-    assert p == {"crf": "25", "preset": "veryfast", "threads": "3",
+    assert p == {"crf": "28", "preset": "veryfast", "threads": "3",
                  "vf": "scale=854:480:flags=lanczos", "fpsf": "null",
                  "audio_bitrate": "64k"}
 

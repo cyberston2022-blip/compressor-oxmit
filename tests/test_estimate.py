@@ -44,13 +44,13 @@ def test_h264_bpp_calibrated_to_production():
 def test_bpp_base_override_is_honored():
     # edu480.predict_guard passes cfg.estimate_bpp_h264 through; a large
     # base must raise the prediction (conservative guard), a tiny one lower it.
-    mid, _ = estimate_output_bytes(600.0, 854 * 480, "h264", 25,
-                                   audio_kbps=64, source_bytes=0)
-    big, _ = estimate_output_bytes(600.0, 854 * 480, "h264", 25,
-                                   audio_kbps=64, source_bytes=0, bpp_base=0.30)
-    tiny, _ = estimate_output_bytes(600.0, 854 * 480, "h264", 25,
-                                    audio_kbps=64, source_bytes=0, bpp_base=0.01)
-    assert tiny[0] < mid[0] < big[0]
+    mid_lo, _ = estimate_output_bytes(600.0, 854 * 480, "h264", 25,
+                                      audio_kbps=64, source_bytes=0)
+    big_lo, _ = estimate_output_bytes(600.0, 854 * 480, "h264", 25,
+                                      audio_kbps=64, source_bytes=0, bpp_base=0.30)
+    tiny_lo, _ = estimate_output_bytes(600.0, 854 * 480, "h264", 25,
+                                       audio_kbps=64, source_bytes=0, bpp_base=0.01)
+    assert tiny_lo < mid_lo < big_lo
 
 
 def test_format_helpers():
