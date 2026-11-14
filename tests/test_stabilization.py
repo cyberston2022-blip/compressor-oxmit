@@ -150,6 +150,24 @@ def test_summary_text_known_duration(engine):
     assert "2:05" in text
 
 
+def test_summary_text_sub_second_duration(engine):
+    text = engine._summary_text(
+        "fa", job_id="abcdef13", profile="edu480", filename="short.mp4",
+        source_size=1000, output_size=900,
+        probe={"width": 640, "height": 480, "duration_s": 0.4},
+        started=None, completed=None, new=True,
+    )
+    assert "0:01" in text
+    assert "0:00" not in text
+
+
+def test_fmt_clock_rounding():
+    from oxmit.engine import _fmt_clock
+    assert _fmt_clock(0.4) == "0:01"
+    assert _fmt_clock(59.8) == "1:00"
+    assert _fmt_clock(0) == "0:00"
+
+
 def test_build_caption_unknown_duration():
     cap = archive_mod.build_caption(
         "v.mp4", "EDU480", {"width": 640, "height": 480, "vcodec": "h264",

@@ -181,3 +181,37 @@ async def test_deliver_result_sub_second_duration_rounds_to_one(monkeypatch):
     assert kwargs.get("height") == 480
 
 
+def test_build_caption_sub_second_rounds_to_one():
+    probe = {
+        "width": 1280,
+        "height": 720,
+        "vcodec": "h264",
+        "acodec": "aac",
+        "duration_s": 0.4,
+    }
+    cap = build_caption("short.mp4", "Balanced", probe, 10_000, 5_000, "abc12345")
+    assert "0:01" in cap
+    assert "0:00" not in cap
+
+
+@pytest.mark.asyncio
+async def test_deliver_result_zero_duration_normalized_to_none():
+    engine = MagicMock()
+    msg = MagicMock()
+    msg.message_id = 891
+    engine.bot.send_video = AsyncMock(return_value=msg)
+
+    ok, method, mid = await deliver_result(
+        engine,
+        chat_id=123,
+        file_id="fid-123",
+        duration=0,
+    )
+    assert ok is True
+    assert method == "file_id"
+    kwargs = engine.bot.send_video.await_args.kwargs
+    # duration=0 must be normalized to None so Telegram does not render 00:00
+    assert kwargs.get("duration") is None
+
+
+

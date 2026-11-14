@@ -81,8 +81,8 @@ def _ensure_tz(dt: datetime | None) -> datetime | None:
 
 
 def _fmt_clock(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    h, rem = divmod(seconds, 3600)
+    s_val = max(1, int(round(seconds))) if seconds > 0 else 0
+    h, rem = divmod(s_val, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
@@ -1321,7 +1321,7 @@ class JobEngine(QueueMixin):
                         "merged file exceeds the Telegram upload limit - "
                         "use merge+compress")
                 merged_probe = await media_mod.probe_video(out_path)
-                m_dur = int(round(merged_probe.get("duration_s") or 0)) if merged_probe.get("duration_s") else None
+                m_dur = max(1, int(round(merged_probe["duration_s"]))) if merged_probe.get("duration_s") else None
                 sent_ok = False
                 try:
                     await self.bot.send_video(
@@ -2283,6 +2283,8 @@ class JobEngine(QueueMixin):
         exponential-backoff retry on transient errors (pattern: ArgonsEncoder
         UploadManager, reimplemented for Bot API)."""
         last_exc: Exception | None = None
+        if duration is not None:
+            duration = max(1, int(round(duration))) if duration > 0 else None
         if not duration or not width or not height:
             try:
                 p = await media_mod.probe_video(path)

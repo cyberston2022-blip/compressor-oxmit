@@ -64,8 +64,14 @@ def _throttled(callback: CallbackQuery) -> bool:
 def _clock(seconds) -> str:
     if not seconds:
         return "?"
-    seconds = int(seconds)
-    h, rem = divmod(seconds, 3600)
+    try:
+        sec_f = float(seconds)
+        if sec_f <= 0:
+            return "?"
+        s_val = max(1, int(round(sec_f)))
+    except (ValueError, TypeError):
+        return "?"
+    h, rem = divmod(s_val, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 

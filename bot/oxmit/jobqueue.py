@@ -94,8 +94,8 @@ def _ts(dt) -> str:
 
 
 def _clock(seconds: float) -> str:
-    seconds = max(0, int(seconds))
-    h, rem = divmod(seconds, 3600)
+    s_val = max(1, int(round(seconds))) if seconds > 0 else 0
+    h, rem = divmod(s_val, 3600)
     m, s = divmod(rem, 60)
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 

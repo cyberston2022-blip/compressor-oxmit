@@ -107,3 +107,18 @@ async def test_duration_limit(engine, fake_db):
     assert exc.value.code == "too_long"
     await engine.check_duration_limit(1, 5 * 3600)  # 5h is within 6h limit
     await engine.check_duration_limit(1, 60)  # fine
+
+
+def test_intake_and_queue_clock_rounding():
+    from oxmit.handlers.intake import _clock as intake_clock
+    from oxmit.jobqueue import _clock as queue_clock
+
+    # Sub-second duration must round to 1s, never 0:00
+    assert intake_clock(0.4) == "0:01"
+    assert intake_clock(59.8) == "1:00"
+    assert intake_clock(0) == "?"
+    assert intake_clock(None) == "?"
+
+    assert queue_clock(0.4) == "0:01"
+    assert queue_clock(59.8) == "1:00"
+    assert queue_clock(0) == "0:00"

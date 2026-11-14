@@ -51,7 +51,8 @@ def build_caption(
     # Unknown duration must not render as 0:00 (F-DUR).
     duration = probe.get("duration_s")
     if duration:
-        mins, secs = divmod(int(duration), 60)
+        dur_sec = max(1, int(round(duration)))
+        mins, secs = divmod(dur_sec, 60)
         hours, mins = divmod(mins, 60)
         dur_text = f"{hours}:{mins:02d}:{secs:02d}" if hours else f"{mins}:{secs:02d}"
     else:
@@ -123,6 +124,8 @@ async def deliver_result(
             else:
                 log.info("copy failed, trying file_id/local",
                          extra={"detail": str(exc)[:150]})
+    if duration is not None:
+        duration = max(1, int(round(duration))) if duration > 0 else None
     if not as_document and (not duration or not width or not height) and file_path:
         try:
             p = await media_mod.probe_video(file_path)
