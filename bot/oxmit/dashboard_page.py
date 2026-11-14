@@ -872,57 +872,81 @@ input[type="range"] {
         </div>
 
         <div style="display:flex;flex-direction:column;gap:18px;padding-top:10px">
-          <!-- Group 1 -->
+          <!-- Group 1: Queue & Limits -->
           <div style="background:var(--card-sub);padding:14px;border-radius:8px;border:1px solid var(--border)">
             <h4 style="margin:0 0 12px 0;color:var(--acc);font-size:14px;display:flex;align-items:center;gap:6px">
-              ⚡ ظرفیت و محدودیت‌های همزمانی (Concurrency & Capacity)
+              ⚡ ظرفیت و محدودیت‌های صف (Queue & Limits)
             </h4>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
               <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر طول مجاز کل صف (Global Queue Limit)</label>
-                <input type="number" id="cfg-max_queue_size" min="10" max="5000" style="width:100%" placeholder="500">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">وضعیت پذیرش کار جدید</label>
+                <select id="cfg-accepting_new_jobs" style="width:100%">
+                  <option value="true">فعال (دریافت ویدیوی جدید)</option>
+                  <option value="false">متوقف (عدم پذیرش)</option>
+                </select>
               </div>
               <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">ورکرهای موازی انکود (Encoding Workers)</label>
-                <input type="number" id="cfg-active_encoding_workers" min="1" max="16" style="width:100%" placeholder="3">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر ظرفیت کل صف انتظار</label>
+                <input type="number" id="cfg-max_global_queue_size" min="10" max="10000" style="width:100%" placeholder="500">
               </div>
               <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر دانلودهای همزمان (Max Downloads)</label>
-                <input type="number" id="cfg-max_active_downloads" min="1" max="16" style="width:100%" placeholder="5">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">سقف کار همزمان کاربر عادی</label>
+                <input type="number" id="cfg-max_concurrent_jobs_per_user" min="1" max="50" style="width:100%" placeholder="3">
               </div>
               <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر آپلودهای همزمان (Max Uploads)</label>
-                <input type="number" id="cfg-max_active_uploads" min="1" max="16" style="width:100%" placeholder="4">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">سقف کار همزمان کاربر ویژه (VIP)</label>
+                <input type="number" id="cfg-max_concurrent_jobs_vip" min="1" max="100" style="width:100%" placeholder="10">
+              </div>
+              <div style="grid-column:1 / -1">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر حجم مجاز فایل ورودی (MB)</label>
+                <input type="number" id="cfg-max_file_size_mb" min="10" max="4000" style="width:100%" placeholder="2000">
               </div>
             </div>
           </div>
 
-          <!-- Group 2 -->
+          <!-- Group 2: Workers & Hardware -->
+          <div style="background:var(--card-sub);padding:14px;border-radius:8px;border:1px solid var(--border)">
+            <h4 style="margin:0 0 12px 0;color:var(--purple);font-size:14px;display:flex;align-items:center;gap:6px">
+              🖥️ ورکرها و سخت‌افزار (Workers & FFmpeg)
+            </h4>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">ورکرهای موازی انکود (Encoding)</label>
+                <input type="number" id="cfg-active_encoding_workers" min="1" max="16" style="width:100%" placeholder="2">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">ورکرهای دانلود همزمان (Downloads)</label>
+                <input type="number" id="cfg-active_download_workers" min="1" max="20" style="width:100%" placeholder="4">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">ورکرهای آپلود همزمان (Uploads)</label>
+                <input type="number" id="cfg-active_upload_workers" min="1" max="20" style="width:100%" placeholder="4">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">رشته پردازنده FFmpeg (0=خودکار)</label>
+                <input type="number" id="cfg-ffmpeg_threads_per_worker" min="0" max="64" style="width:100%" placeholder="0">
+              </div>
+            </div>
+          </div>
+
+          <!-- Group 3: Fairness Engine -->
           <div style="background:var(--card-sub);padding:14px;border-radius:8px;border:1px solid var(--border)">
             <h4 style="margin:0 0 12px 0;color:var(--amber);font-size:14px;display:flex;align-items:center;gap:6px">
-              ⚖️ الگوریتم زمان‌بندی و عدالت صف (Scheduling & Fairness)
+              ⚖️ الگوریتم عدالت در صف (Fairness Engine)
             </h4>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
               <div style="grid-column:1 / -1">
                 <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">الگوریتم فعال پردازش صف</label>
-                <select id="cfg-queue_scheduling_algorithm" style="width:100%">
-                  <option value="fair_round_robin">Fair Round-Robin (عدالت گردشی میان کاربران)</option>
-                  <option value="weighted_fair">Weighted Fair Queuing (وزن‌دار با اولویت VIP)</option>
-                  <option value="strict_fifo">Strict FIFO (صف کلاسیک به ترتیب زمان ثبت)</option>
-                  <option value="size_aware_fair">Size-Aware Fair (ترکیب فایل‌های سبک و سنگین)</option>
+                <select id="cfg-queue_scheduling_mode" style="width:100%">
+                  <option value="fair_round_robin">Fair Round-Robin (عدالت چرخشی پویا)</option>
+                  <option value="weighted_fair">Weighted Fair Queuing (WFQ)</option>
+                  <option value="strict_fifo">Strict FIFO (نوبت زمانی مطلق)</option>
+                  <option value="size_aware_fair">Size-Aware Fair (عدالت آگاه به حجم)</option>
                 </select>
               </div>
               <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">آستانه گرسنگی صف (ثانیه)</label>
-                <input type="number" id="cfg-fairness_starvation_threshold_sec" min="60" max="86400" style="width:100%" placeholder="1800">
-              </div>
-              <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">وزن سوگیری اندازه فایل (0.0 تا 1.0)</label>
-                <input type="number" step="0.1" id="cfg-fairness_size_bias_weight" min="0" max="1" style="width:100%" placeholder="0.5">
-              </div>
-              <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">فاصله بروزرسانی کارت صف تلگرام (ثانیه)</label>
-                <input type="number" id="cfg-queue_card_throttle_sec" min="3" max="60" style="width:100%" placeholder="10">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">جریمه زمانی هر ویدیوی اضافه در صف WFQ (ثانیه)</label>
+                <input type="number" id="cfg-wfq_time_penalty_seconds" min="10" max="3600" style="width:100%" placeholder="300">
               </div>
               <div>
                 <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">دور زدن صف توسط مدیران (Admin Bypass)</label>
@@ -934,44 +958,23 @@ input[type="range"] {
             </div>
           </div>
 
-          <!-- Group 3 -->
-          <div style="background:var(--card-sub);padding:14px;border-radius:8px;border:1px solid var(--border)">
-            <h4 style="margin:0 0 12px 0;color:var(--blue);font-size:14px;display:flex;align-items:center;gap:6px">
-              👥 سیاست سهمیه کاربران (User Quotas & Concurrency)
-            </h4>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-              <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر کار همزمان کاربر عادی</label>
-                <input type="number" id="cfg-user_active_job_limit" min="1" max="10" style="width:100%" placeholder="1">
-              </div>
-              <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر کار همزمان کاربر VIP</label>
-                <input type="number" id="cfg-vip_active_job_limit" min="1" max="20" style="width:100%" placeholder="3">
-              </div>
-              <div style="grid-column:1 / -1">
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">زمان کول‌داون بین دو درخواست کاربر (ثانیه)</label>
-                <input type="number" id="cfg-user_cooldown_seconds" min="0" max="300" style="width:100%" placeholder="0">
-              </div>
-            </div>
-          </div>
-
-          <!-- Group 4 -->
+          <!-- Group 4: Telegram Progress UI & Telemetry -->
           <div style="background:var(--card-sub);padding:14px;border-radius:8px;border:1px solid var(--border)">
             <h4 style="margin:0 0 12px 0;color:var(--green);font-size:14px;display:flex;align-items:center;gap:6px">
-              🛡️ نگهداری دیسک و پایداری (Disk & Safety)
+              📡 تله‌متری تلگرام و پایداری (Telegram UI & Safety)
             </h4>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
               <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">آستانه پاکسازی خودکار دیسک (GB)</label>
-                <input type="number" step="0.5" id="cfg-temp_cleanup_threshold_gb" min="1" max="500" style="width:100%" placeholder="20.0">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">بازه آپدیت پیام پیشرفت تلگرام (ثانیه)</label>
+                <input type="number" id="cfg-progress_update_interval_sec" min="1" max="60" style="width:100%" placeholder="4">
               </div>
               <div>
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">آستانه دیسک اضطراری توقف intake (GB)</label>
-                <input type="number" step="0.5" id="cfg-emergency_disk_threshold_gb" min="1" max="100" style="width:100%" placeholder="5.0">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">تعداد کاراکترهای نوار پیشرفت</label>
+                <input type="number" id="cfg-progress_bar_length" min="5" max="30" style="width:100%" placeholder="12">
               </div>
               <div style="grid-column:1 / -1">
-                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر دفعات تلاش مجدد تسک‌های خطا (Retries)</label>
-                <input type="number" id="cfg-max_job_retries" min="0" max="5" style="width:100%" placeholder="2">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">تعداد تلاش مجدد خودکار هنگام خطا (Retries)</label>
+                <input type="number" id="cfg-auto_retry_failed_jobs" min="0" max="10" style="width:100%" placeholder="1">
               </div>
             </div>
           </div>
@@ -1739,11 +1742,17 @@ async function cleanTempFiles(e) {
   if (e) e.stopPropagation();
   if (!confirm("آیا از پاکسازی تمام فایل‌های موقت دانلود و انکود اطمینان دارید؟")) return;
   try {
-    const res = await api("/panel/api/system/cleanup_temp", { method: "POST" });
-    toast(res.message || "پاکسازی فایل‌های موقت با موفقیت انجام شد", "success");
+    const res = await api("/panel/api/server/cleanup", { method: "POST" });
+    toast(`پاکسازی با موفقیت انجام شد (${res.disk_free_gb || 0} GB آزاد)`, "success");
     loadOverview();
   } catch (err) {
-    toast("خطا در پاکسازی: " + err.message, "danger");
+    try {
+      const res2 = await api("/panel/api/system/cleanup_temp", { method: "POST" });
+      toast(res2.message || "پاکسازی فایل‌های موقت با موفقیت انجام شد", "success");
+      loadOverview();
+    } catch (e) {
+      toast("خطا در پاکسازی: " + (e.message || e), "danger");
+    }
   }
 }
 
@@ -1769,23 +1778,21 @@ async function loadConfig() {
 
 async function saveDynamicConfig() {
   const keys = [
-    "max_queue_size", "max_active_downloads", "active_encoding_workers", "max_active_uploads",
-    "queue_scheduling_algorithm", "fairness_starvation_threshold_sec", "fairness_size_bias_weight",
-    "queue_card_throttle_sec", "admin_queue_bypass",
-    "user_active_job_limit", "vip_active_job_limit", "user_cooldown_seconds",
-    "temp_cleanup_threshold_gb", "emergency_disk_threshold_gb", "max_job_retries"
+    "accepting_new_jobs", "max_global_queue_size", "max_concurrent_jobs_per_user",
+    "max_concurrent_jobs_vip", "max_file_size_mb", "active_encoding_workers",
+    "active_download_workers", "active_upload_workers", "ffmpeg_threads_per_worker",
+    "queue_scheduling_mode", "wfq_time_penalty_seconds", "admin_queue_bypass",
+    "progress_update_interval_sec", "progress_bar_length", "auto_retry_failed_jobs"
   ];
   const payload = {};
   for (const k of keys) {
     const el = $(`#cfg-${k}`);
     if (el) {
       let val = el.value;
-      if (k === "admin_queue_bypass") {
+      if (k === "accepting_new_jobs" || k === "admin_queue_bypass") {
         payload[k] = val === "true";
-      } else if (k === "queue_scheduling_algorithm") {
+      } else if (k === "queue_scheduling_mode") {
         payload[k] = String(val);
-      } else if (k.includes("weight") || k.includes("threshold_gb")) {
-        payload[k] = parseFloat(val);
       } else {
         payload[k] = parseInt(val, 10);
       }

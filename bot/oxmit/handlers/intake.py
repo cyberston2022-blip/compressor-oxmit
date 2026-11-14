@@ -209,7 +209,16 @@ def build_router(engine, db, cfg, state) -> Router:
             except TelegramAPIError:
                 pass
         elif outcome == "joined" and status_id:
-            await engine.edit_status_sync(chat_id, status_id, tr("status_joined", lang))
+            info = await engine.queue_info(job_id) if job_id else {}
+            text = engine.queue_card_text(
+                lang, name=out_name, size=int(draft["size_bytes"] or 0),
+                dur=draft["duration_s"], job_id=job_id, info=info)
+            try:
+                await engine.bot.edit_message_text(
+                    chat_id=chat_id, message_id=status_id, text=text,
+                    reply_markup=engine._job_kb(job_id, lang))
+            except TelegramAPIError:
+                await engine.edit_status_sync(chat_id, status_id, tr("status_joined", lang))
         elif outcome == "reused" and result.get("kind") == "known_output":
             try:
                 await engine.bot.send_message(chat_id, tr("known_output", lang))
@@ -351,7 +360,7 @@ def build_router(engine, db, cfg, state) -> Router:
             await _promote_next(draft["tg_id"])
 
     # ---- cancel button on the queue/progress card ----
-    @router.callback_query(F.data.startswith("canc:"))
+    @router.callback_query(F.data.startswith("canc:") | F.data.startswith("cancel_job:"))
     async def on_cancel_btn(callback: CallbackQuery):
         if _throttled(callback):
             await callback.answer()

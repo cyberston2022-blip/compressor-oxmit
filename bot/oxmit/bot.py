@@ -187,6 +187,8 @@ async def main() -> None:
         asyncio.create_task(sweep_loop(engine, intake_router, adminpanel_router,
                                        merge_router, nav_router, support_router)),
         asyncio.create_task(engine.fingerprinter.run()),
+        asyncio.create_task(engine._queue_progress_refresher_loop()),
+        asyncio.create_task(engine._orphan_disk_cleanup_loop()),
     ]
 
     try:

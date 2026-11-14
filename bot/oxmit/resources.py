@@ -12,11 +12,57 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Callable
 
 from .config import Settings
 from .log import get_logger
 
 log = get_logger("oxmit.resources")
+
+
+class DynamicResizableSemaphore:
+    """True dynamic resizable semaphore backed by asyncio.Condition.
+
+    Supports runtime resizing without losing active lease accounting or leaking concurrency.
+    Wired to DynamicConfig limit getters and notified on settings change.
+    """
+
+    def __init__(self, limit_getter: Callable[[], int], name: str = "limiter") -> None:
+        self._limit_getter = limit_getter
+        self._name = name
+        self._active = 0
+        self._cond = asyncio.Condition()
+
+    @property
+    def active_count(self) -> int:
+        return self._active
+
+    @property
+    def current_limit(self) -> int:
+        return max(1, int(self._limit_getter()))
+
+    async def acquire(self) -> None:
+        async with self._cond:
+            while self._active >= self.current_limit:
+                await self._cond.wait()
+            self._active += 1
+
+    async def release(self) -> None:
+        async with self._cond:
+            self._active = max(0, self._active - 1)
+            self._cond.notify_all()
+
+    async def notify_limit_changed(self) -> None:
+        async with self._cond:
+            self._cond.notify_all()
+
+    async def __aenter__(self) -> "DynamicResizableSemaphore":
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.release()
+
 
 
 def cores_for(active: int, pool: float, replicas: int, floor: float) -> float:

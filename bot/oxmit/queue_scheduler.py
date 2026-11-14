@@ -29,37 +29,61 @@ ALGORITHM_LABELS_FA: dict[str, str] = {
 
 
 def build_queue_order_cte(mode: str, admin_bypass: bool = False, penalty: int = 300) -> str:
-    """Generate the SQL CTE for ordering queued jobs according to the active algorithm."""
+    """Generate the SQL CTE for ordering queued jobs according to the active algorithm.
+
+    Implements Active-Aware Deficit Fair-Share Scheduling by factoring each user's
+    in-flight 'processing' jobs (ActiveUserLoad CTE) into their fairness layer offset,
+    preventing multi-worker queue starvation.
+    """
     admin_sql = "TRUE" if admin_bypass else "FALSE"
     penalty_int = int(penalty)
 
     if mode == "weighted_fair":
         return f"""
-        WITH OrderedQueue AS (
+        WITH ActiveUserLoad AS (
+            SELECT
+                requester_tg_id,
+                COUNT(*)::INTEGER AS active_count
+            FROM jobs
+            WHERE status = 'processing'
+            GROUP BY requester_tg_id
+        ),
+        OrderedQueue AS (
             SELECT
                 j.id,
                 j.requester_tg_id AS user_id,
                 j.enqueued_at,
-                j.source_size,
+                COALESCE(j.source_size, 0) AS source_size,
                 COALESCE(j.priority_boost, 0) AS priority_boost,
                 CASE
                     WHEN {admin_sql} = TRUE AND j.is_admin_job = TRUE THEN 1
                     ELSE 0
                 END AS effective_priority,
-                ROW_NUMBER() OVER (
-                    PARTITION BY j.requester_tg_id
-                    ORDER BY j.enqueued_at ASC, j.id ASC
+                (
+                    ROW_NUMBER() OVER (
+                        PARTITION BY j.requester_tg_id
+                        ORDER BY j.enqueued_at ASC, j.id ASC
+                    ) + COALESCE(aul.active_count, 0)
+                ) AS effective_user_rank,
+                (
+                    ROW_NUMBER() OVER (
+                        PARTITION BY j.requester_tg_id
+                        ORDER BY j.enqueued_at ASC, j.id ASC
+                    ) + COALESCE(aul.active_count, 0)
                 ) AS user_rank_index
             FROM jobs j
+            LEFT JOIN ActiveUserLoad aul ON aul.requester_tg_id = j.requester_tg_id
             WHERE j.status = 'queued'
         )
         SELECT
             oq.id,
+            oq.user_id,
+            oq.effective_user_rank AS true_fair_layer,
             ROW_NUMBER() OVER (
                 ORDER BY
                     oq.priority_boost DESC,
                     oq.effective_priority DESC,
-                    (oq.enqueued_at + ((oq.user_rank_index - 1) * ({penalty_int} * INTERVAL '1 second'))) ASC,
+                    (oq.enqueued_at + ((oq.effective_user_rank - 1) * ({penalty_int} * INTERVAL '1 second'))) ASC,
                     oq.id ASC
             ) AS global_queue_position
         FROM OrderedQueue oq
@@ -71,6 +95,7 @@ def build_queue_order_cte(mode: str, admin_bypass: bool = False, penalty: int = 
                 j.id,
                 j.requester_tg_id AS user_id,
                 j.enqueued_at,
+                COALESCE(j.source_size, 0) AS source_size,
                 COALESCE(j.priority_boost, 0) AS priority_boost,
                 CASE
                     WHEN {admin_sql} = TRUE AND j.is_admin_job = TRUE THEN 1
@@ -81,6 +106,7 @@ def build_queue_order_cte(mode: str, admin_bypass: bool = False, penalty: int = 
         )
         SELECT
             oq.id,
+            oq.user_id,
             ROW_NUMBER() OVER (
                 ORDER BY
                     oq.priority_boost DESC,
@@ -92,32 +118,45 @@ def build_queue_order_cte(mode: str, admin_bypass: bool = False, penalty: int = 
         """
     elif mode == "size_aware_fair":
         return f"""
-        WITH OrderedQueue AS (
+        WITH ActiveUserLoad AS (
+            SELECT
+                requester_tg_id,
+                COUNT(*)::INTEGER AS active_count
+            FROM jobs
+            WHERE status = 'processing'
+            GROUP BY requester_tg_id
+        ),
+        OrderedQueue AS (
             SELECT
                 j.id,
                 j.requester_tg_id AS user_id,
                 j.enqueued_at,
-                j.source_size,
+                COALESCE(j.source_size, 0) AS source_size,
                 COALESCE(j.priority_boost, 0) AS priority_boost,
                 CASE
                     WHEN {admin_sql} = TRUE AND j.is_admin_job = TRUE THEN 1
                     ELSE 0
                 END AS effective_priority,
-                ROW_NUMBER() OVER (
-                    PARTITION BY j.requester_tg_id
-                    ORDER BY j.enqueued_at ASC, j.id ASC
-                ) AS fair_layer
+                (
+                    ROW_NUMBER() OVER (
+                        PARTITION BY j.requester_tg_id
+                        ORDER BY j.enqueued_at ASC, j.id ASC
+                    ) + COALESCE(aul.active_count, 0)
+                ) AS true_fair_layer
             FROM jobs j
+            LEFT JOIN ActiveUserLoad aul ON aul.requester_tg_id = j.requester_tg_id
             WHERE j.status = 'queued'
         )
         SELECT
             oq.id,
+            oq.user_id,
+            oq.true_fair_layer,
             ROW_NUMBER() OVER (
                 ORDER BY
                     oq.priority_boost DESC,
                     oq.effective_priority DESC,
-                    oq.fair_layer ASC,
-                    COALESCE(oq.source_size, 0) ASC,
+                    oq.true_fair_layer ASC,
+                    oq.source_size ASC,
                     oq.enqueued_at ASC,
                     oq.id ASC
             ) AS global_queue_position
@@ -125,31 +164,44 @@ def build_queue_order_cte(mode: str, admin_bypass: bool = False, penalty: int = 
         """
     else:  # fair_round_robin (default)
         return f"""
-        WITH OrderedQueue AS (
+        WITH ActiveUserLoad AS (
+            SELECT
+                requester_tg_id,
+                COUNT(*)::INTEGER AS active_count
+            FROM jobs
+            WHERE status = 'processing'
+            GROUP BY requester_tg_id
+        ),
+        OrderedQueue AS (
             SELECT
                 j.id,
                 j.requester_tg_id AS user_id,
                 j.enqueued_at,
-                j.source_size,
+                COALESCE(j.source_size, 0) AS source_size,
                 COALESCE(j.priority_boost, 0) AS priority_boost,
                 CASE
                     WHEN {admin_sql} = TRUE AND j.is_admin_job = TRUE THEN 1
                     ELSE 0
                 END AS effective_priority,
-                ROW_NUMBER() OVER (
-                    PARTITION BY j.requester_tg_id
-                    ORDER BY j.enqueued_at ASC, j.id ASC
-                ) AS fair_layer
+                (
+                    ROW_NUMBER() OVER (
+                        PARTITION BY j.requester_tg_id
+                        ORDER BY j.enqueued_at ASC, j.id ASC
+                    ) + COALESCE(aul.active_count, 0)
+                ) AS true_fair_layer
             FROM jobs j
+            LEFT JOIN ActiveUserLoad aul ON aul.requester_tg_id = j.requester_tg_id
             WHERE j.status = 'queued'
         )
         SELECT
             oq.id,
+            oq.user_id,
+            oq.true_fair_layer,
             ROW_NUMBER() OVER (
                 ORDER BY
                     oq.priority_boost DESC,
                     oq.effective_priority DESC,
-                    oq.fair_layer ASC,
+                    oq.true_fair_layer ASC,
                     oq.enqueued_at ASC,
                     oq.id ASC
             ) AS global_queue_position
@@ -219,34 +271,41 @@ class QueueScheduler:
         }
 
     async def claim_next_job(self, worker_id: str) -> dict[str, Any] | None:
-        """Atomically claim the next job in queue with FOR UPDATE SKIP LOCKED."""
+        """Atomically claim the next job in queue with FOR UPDATE SKIP LOCKED.
+
+        Eliminates lock contention by using a candidate window (LIMIT 25) so
+        concurrent workers do not serialize on a single locked top candidate.
+        """
         mode = self.cfg.get_str("queue_scheduling_mode", "fair_round_robin")
         penalty = self.cfg.get_int("wfq_time_penalty_seconds", 300)
         admin_bypass = self.cfg.get_bool("admin_queue_bypass", False)
 
         cte = build_queue_order_cte(mode, admin_bypass=admin_bypass, penalty=penalty)
         claim_sql = f"""
-        WITH NextInQueue AS (
+        WITH NextCandidates AS (
             {cte}
             ORDER BY global_queue_position ASC
-            LIMIT 1
+            LIMIT 25
         )
-        UPDATE jobs
+        UPDATE jobs AS target
         SET
             status = 'processing',
             stage = 'downloading',
             worker_id = $1,
-            started_at = COALESCE(started_at, now()),
+            started_at = COALESCE(target.started_at, now()),
+            download_started_at = now(),
             updated_at = now()
-        WHERE id = (
+        FROM (
             SELECT j.id
             FROM jobs j
-            JOIN NextInQueue n ON n.id = j.id
+            INNER JOIN NextCandidates nc ON nc.id = j.id
             WHERE j.status = 'queued'
-            FOR UPDATE SKIP LOCKED
+            ORDER BY nc.global_queue_position ASC
+            FOR UPDATE OF j SKIP LOCKED
             LIMIT 1
-        )
-        RETURNING id, requester_tg_id, chat_id, media_id, profile, source_size, source_path, source_message_id, status_message_id
+        ) AS picked
+        WHERE target.id = picked.id
+        RETURNING target.*;
         """
 
         row = await self.db.fetchrow(claim_sql, worker_id)

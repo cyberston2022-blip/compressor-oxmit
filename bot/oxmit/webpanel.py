@@ -285,10 +285,30 @@ async def summary_data(engine, db, cfg, state) -> dict:
     counters["downloading"] = downloading_cnt
     counters["encoding"] = encoding_cnt
     counters["uploading"] = uploading_cnt
+    counters["active_downloads"] = downloading_cnt
+    counters["active_encodes"] = encoding_cnt
+    counters["active_uploads"] = uploading_cnt
     counters["max_queue"] = max_queue
     counters["max_concurrent"] = max_workers
     counters["bytes_saved_today"] = bytes_saved_today
     counters["bytes_saved_today_gb"] = round(bytes_saved_today / (1024**3), 2)
+
+    avg_dur = await db.fetchval(
+        """
+        SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (completed_at - started_at))), 120.0)
+        FROM jobs
+        WHERE status = 'completed' AND completed_at > now() - interval '24 hours'
+        """
+    ) or 120.0
+    wait_cycles = math.ceil(queued_cnt / max(1, max_workers))
+    est_clear_s = int(wait_cycles * avg_dur)
+    from .telemetry_cards import fmt_duration_fa
+    counters["est_clear_time_fa"] = fmt_duration_fa(est_clear_s) if queued_cnt > 0 else "تخلیه کامل"
+
+    data["active_downloading"] = downloading_cnt
+    data["active_encoding"] = encoding_cnt
+    data["active_uploading"] = uploading_cnt
+    data["est_clear_time_fa"] = counters["est_clear_time_fa"]
 
     data["counters"] = counters
     # get_me goes through the engine cache (SPEC-02): this route is polled
@@ -1357,7 +1377,114 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
     app.router.add_get("/panel/api/bot/config", require_owner(bot_config_get_handler))
     app.router.add_post("/panel/api/bot/config", require_owner(bot_config_post_handler))
 
-    # Milestone 1 Compression Management APIs (registered before generic {action} route)
+    async def server_cleanup_handler(request: web.Request, session: dict) -> web.Response:
+        before_free = shutil.disk_usage(cfg.media_root).free
+        await engine.cleanup_sweep()
+        after_free = shutil.disk_usage(cfg.media_root).free
+        freed_bytes = max(0, after_free - before_free)
+        freed_mb = round(freed_bytes / (1024 * 1024), 2)
+        disk_free_gb = round(after_free / (1024 * 1024 * 1024), 2)
+        await audit_mod.log_action(db, session["actor"], "admin", "server.cleanup", None, f"freed {freed_mb}MB", "web", _ip(request))
+        return _json({"ok": True, "freed_mb": freed_mb, "disk_free_gb": disk_free_gb})
+
+    async def job_retry_handler(request: web.Request, session: dict) -> web.Response:
+        jid_str = request.match_info["job_id"]
+        try:
+            jid = uuid.UUID(jid_str)
+        except (ValueError, TypeError):
+            return _json({"error": "invalid job_id"}, 400)
+        row = await db.fetchrow("SELECT id, status FROM jobs WHERE id = $1", jid)
+        if not row:
+            return _json({"error": "job not found"}, 404)
+        if row["status"] not in ("failed", "cancelled"):
+            return _json({"error": f"cannot retry job in status {row['status']}"}, 400)
+        await db.execute(
+            """
+            UPDATE jobs
+            SET status = 'queued', stage = 'queued', retries = 0,
+                error_category = NULL, error_message = NULL,
+                cancel_reason = NULL, cancelled_at = NULL,
+                worker_id = NULL, updated_at = now()
+            WHERE id = $1
+            """, jid
+        )
+        engine.kick_dispatch()
+        await audit_mod.log_action(db, session["actor"], "admin", "job.retry", str(jid), None, "web", _ip(request))
+        return _json({"ok": True, "job_id": str(jid)})
+
+    async def job_bulk_cancel_handler(request: web.Request, session: dict) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return _json({"error": "bad json"}, 400)
+        job_ids = body.get("job_ids", [])
+        if not isinstance(job_ids, list):
+            return _json({"error": "job_ids must be a list"}, 400)
+        cancelled = []
+        for jid_str in job_ids:
+            try:
+                jid = uuid.UUID(str(jid_str))
+            except (ValueError, TypeError):
+                continue
+            ok = await engine.cancel_job(str(jid), by_admin=True)
+            if ok:
+                cancelled.append(str(jid))
+        await audit_mod.log_action(db, session["actor"], "admin", "job.bulk_cancel", None, f"cancelled {len(cancelled)} jobs", "web", _ip(request))
+        return _json({"ok": True, "cancelled": cancelled, "count": len(cancelled)})
+
+    async def user_quota_handler(request: web.Request, session: dict) -> web.Response:
+        try:
+            tg_id = int(request.match_info["tg_id"])
+        except (ValueError, TypeError):
+            return _json({"error": "invalid tg_id"}, 400)
+        try:
+            body = await request.json()
+        except Exception:
+            return _json({"error": "bad json"}, 400)
+        is_vip = body.get("is_vip")
+        custom_limit = body.get("custom_queue_limit")
+        updates = []
+        params = [tg_id]
+        if is_vip is not None:
+            params.append(bool(is_vip))
+            updates.append(f"is_vip = ${len(params)}")
+        if "custom_queue_limit" in body:
+            val = int(custom_limit) if (custom_limit is not None and str(custom_limit).strip() != "") else None
+            params.append(val)
+            updates.append(f"custom_queue_limit = ${len(params)}")
+        if updates:
+            sql = f"UPDATE users SET {', '.join(updates)} WHERE tg_id = $1"
+            await db.execute(sql, *params)
+        await audit_mod.log_action(db, session["actor"], "admin", "user.quota", str(tg_id), str(body), "web", _ip(request))
+        return _json({"ok": True, "tg_id": tg_id})
+
+    async def user_message_handler(request: web.Request, session: dict) -> web.Response:
+        try:
+            tg_id = int(request.match_info["tg_id"])
+        except (ValueError, TypeError):
+            return _json({"error": "invalid tg_id"}, 400)
+        try:
+            body = await request.json()
+        except Exception:
+            return _json({"error": "bad json"}, 400)
+        text = str(body.get("text") or "").strip()
+        if not text:
+            return _json({"error": "text is required"}, 400)
+        bot = getattr(engine, "bot", None)
+        if not bot:
+            return _json({"error": "bot not available"}, 500)
+        try:
+            await bot.send_message(chat_id=tg_id, text=f"📩 پیام از طرف مدیریت ربات:\n\n{text}")
+        except Exception as exc:
+            return _json({"error": f"failed to send message: {exc}"}, 502)
+        await audit_mod.log_action(db, session["actor"], "admin", "user.message", str(tg_id), text[:80], "web", _ip(request))
+        return _json({"ok": True, "tg_id": tg_id})
+
+    app.router.add_post("/panel/api/server/cleanup", require_owner(server_cleanup_handler))
+    app.router.add_post("/panel/api/job/bulk-cancel", require_owner(job_bulk_cancel_handler))
+    app.router.add_post("/panel/api/job/{job_id}/retry", require_owner(job_retry_handler))
+    app.router.add_post("/panel/api/bot/user/{tg_id}/quota", require_owner(user_quota_handler))
+    app.router.add_post("/panel/api/bot/user/{tg_id}/message", require_owner(user_message_handler))
     app.router.add_post("/panel/api/jobs/priority", require_owner(jobs_batch_priority_handler))
     app.router.add_post("/panel/api/job/{job_id}/priority", require_owner(job_priority_handler))
     app.router.add_post("/panel/api/job/{job_id}/cancel", require_owner(job_cancel_handler))
@@ -1384,16 +1511,19 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         settings = body.get("settings", {})
         if not isinstance(settings, dict):
             return _json({"error": "settings must be an object"}, 400)
-        for k, v in settings.items():
-            await dyn.set(k, v, admin_tg_id=session.get("actor"))
-            await audit_mod.log_action(db, session["actor"], "admin", f"config.{k}", None, str(v), "web", _ip(request))
+        try:
+            for k, v in settings.items():
+                await dyn.set(k, v, admin_tg_id=session.get("actor"))
+                await audit_mod.log_action(db, session["actor"], "admin", f"config.{k}", None, str(v), "web", _ip(request))
+        except ValueError as exc:
+            return _json({"error": str(exc)}, 400)
         return _json({"ok": True, "settings": dyn.get_all()})
 
     async def queue_preview_handler(request: web.Request) -> web.Response:
         sched = getattr(engine, "queue_scheduler", None)
         if not sched:
             return _json({"items": []})
-        mode = request.query.get("mode")
+        mode = request.query.get("mode") or request.query.get("algorithm")
         items = await sched.preview_queue_order(mode=mode, limit=100)
         return _json({"items": items, "mode": mode or sched.cfg.get_str("queue_scheduling_mode", "fair_round_robin")})
 

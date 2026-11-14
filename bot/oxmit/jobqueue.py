@@ -122,12 +122,39 @@ class QueueMixin:
     # setup
     # ------------------------------------------------------------------
     def _init_queue(self) -> None:
+        from .resources import DynamicResizableSemaphore
         self.worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self._pipelines: dict[str, asyncio.Task] = {}
         self._dispatch_lock = asyncio.Lock()
         self._rate_cache: tuple[float, float] | None = None
         self._card_edit_at: dict[str, float] = {}
+        self._card_text_hash: dict[str, str] = {}
         self._disk_block_notified = 0.0
+
+        # Decoupled Concurrency Pipelines: Download, Encode, Upload limiters
+        dyn = getattr(self, "dynamic_config", None)
+        self.download_limiter = DynamicResizableSemaphore(
+            lambda: self.dynamic_config.get_int("active_download_workers", 4) if getattr(self, "dynamic_config", None) else 4,
+            name="download_limiter",
+        )
+        self.encode_limiter = DynamicResizableSemaphore(
+            lambda: self.dynamic_config.get_int("active_encoding_workers", 2) if getattr(self, "dynamic_config", None) else 2,
+            name="encode_limiter",
+        )
+        self.upload_limiter = DynamicResizableSemaphore(
+            lambda: self.dynamic_config.get_int("active_upload_workers", 4) if getattr(self, "dynamic_config", None) else 4,
+            name="upload_limiter",
+        )
+
+        if dyn:
+            async def _on_limit_change(key: str, val: Any) -> None:
+                if key == "active_download_workers":
+                    await self.download_limiter.notify_limit_changed()
+                elif key == "active_encoding_workers":
+                    await self.encode_limiter.notify_limit_changed()
+                elif key == "active_upload_workers":
+                    await self.upload_limiter.notify_limit_changed()
+            dyn.subscribe(_on_limit_change)
 
     def log_channel(self) -> int | None:
         return self.cfg.log_channel_id or self.state.archive_channel_id
@@ -237,23 +264,62 @@ class QueueMixin:
                     """,
                     int(size_bytes or 0), clean_src, duration_s, width, height,
                     file_id, file_unique_id, clean_src.lower(), (mime or "")[:64] or None)
+
+                # Graceful handling for duplicate active (media_id, profile, profile_version)
+                active_dup = await conn.fetchrow(
+                    """
+                    SELECT id FROM jobs
+                    WHERE media_id = $1 AND profile = 'edu480' AND profile_version = $2
+                      AND status IN ('queued', 'processing')
+                    ORDER BY enqueued_at ASC LIMIT 1
+                    """, media_id, edu480.PROFILE_VERSION)
+                if active_dup is not None:
+                    await conn.execute(
+                        """
+                        INSERT INTO job_requesters
+                            (job_id, tg_id, chat_id, source_message_id, status_message_id)
+                        VALUES ($1,$2,$3,$4,$5) ON CONFLICT (job_id, tg_id) DO NOTHING
+                        """, active_dup["id"], tg_id, chat_id, source_msg_id, status_msg_id)
+                    await self.db.bump("dedup_inflight_joined")
+                    return {"outcome": "joined", "job_id": str(active_dup["id"])}
+
                 dyn = getattr(self, "dynamic_config", None)
                 admin_bypass = dyn.get_bool("admin_queue_bypass", False) if dyn else False
                 priority = 70 if (is_admin and admin_bypass) else (await self.effective_limits(tg_id))["priority"]
-                job_id = await conn.fetchval(
-                    """
-                    INSERT INTO jobs(requester_tg_id, media_id, profile, profile_version,
-                        effective_profile, status, stage, priority, source_size,
-                        source_path, source_message_id, status_message_id, chat_id,
-                        output_name, source_filename, progress_changed_at, reserved_bytes,
-                        is_admin_job, priority_boost)
-                    VALUES ($1,$2,'edu480',$3,'edu480','queued','queued',$4,$5,$6,$7,$8,
-                            $9,$10,$11, now(), 0, $12, 0)
-                    RETURNING id
-                    """,
-                    tg_id, media_id, edu480.PROFILE_VERSION, priority, int(size_bytes or 0),
-                    local_path, source_msg_id, status_msg_id, chat_id, out_stem,
-                    (filename or "")[:255] or None, is_admin)
+                try:
+                    job_id = await conn.fetchval(
+                        """
+                        INSERT INTO jobs(requester_tg_id, media_id, profile, profile_version,
+                            effective_profile, status, stage, priority, source_size,
+                            source_path, source_message_id, status_message_id, chat_id,
+                            output_name, source_filename, progress_changed_at, reserved_bytes,
+                            is_admin_job, priority_boost)
+                        VALUES ($1,$2,'edu480',$3,'edu480','queued','queued',$4,$5,$6,$7,$8,
+                                $9,$10,$11, now(), 0, $12, 0)
+                        RETURNING id
+                        """,
+                        tg_id, media_id, edu480.PROFILE_VERSION, priority, int(size_bytes or 0),
+                        local_path, source_msg_id, status_msg_id, chat_id, out_stem,
+                        (filename or "")[:255] or None, is_admin)
+                except Exception as exc:
+                    if "uq_active_media_profile" in str(exc) or "unique" in str(exc).lower():
+                        existing = await conn.fetchrow(
+                            """
+                            SELECT id FROM jobs
+                            WHERE media_id = $1 AND profile = 'edu480' AND profile_version = $2
+                              AND status IN ('queued', 'processing')
+                            ORDER BY enqueued_at ASC LIMIT 1
+                            """, media_id, edu480.PROFILE_VERSION)
+                        if existing:
+                            await conn.execute(
+                                """
+                                INSERT INTO job_requesters
+                                    (job_id, tg_id, chat_id, source_message_id, status_message_id)
+                                VALUES ($1,$2,$3,$4,$5) ON CONFLICT (job_id, tg_id) DO NOTHING
+                                """, existing["id"], tg_id, chat_id, source_msg_id, status_msg_id)
+                            await self.db.bump("dedup_inflight_joined")
+                            return {"outcome": "joined", "job_id": str(existing["id"])}
+                    raise
                 await conn.execute(
                     """
                     INSERT INTO job_requesters
@@ -666,6 +732,142 @@ class QueueMixin:
             self._card_edit_at.clear()
             self._last_pos.clear()
 
+    async def _queue_progress_refresher_loop(self) -> None:
+        """Periodic background refresher loop for Stage 0 (Queued) Telegram cards.
+
+        Runs every 12 seconds. Executes one batch CTE query for all queued jobs with a
+        telegram_status_msg_id whose position changed, dynamically updates the Persian
+        progress bar and ETA, edits up to 15 cards per cycle (spaced by 0.15s), and
+        persists last_reported_queue_pos in PostgreSQL.
+        """
+        log.info("queue progress refresher loop started")
+        while True:
+            try:
+                await asyncio.sleep(12)
+                sched = getattr(self, "queue_scheduler", None)
+                if not sched or not getattr(self, "bot", None):
+                    continue
+
+                dyn = getattr(self, "dynamic_config", None)
+                mode = dyn.get_str("queue_scheduling_mode", "fair_round_robin") if dyn else "fair_round_robin"
+                penalty = dyn.get_int("wfq_time_penalty_seconds", 300) if dyn else 300
+                admin_bypass = dyn.get_bool("admin_queue_bypass", False) if dyn else False
+                active_workers = max(1, dyn.get_int("active_encoding_workers", 2) if dyn else 2)
+                bar_len = dyn.get_int("progress_bar_length", 12) if dyn else 12
+
+                from .queue_scheduler import build_queue_order_cte, ALGORITHM_LABELS_FA
+                cte = build_queue_order_cte(mode, admin_bypass=admin_bypass, penalty=penalty)
+
+                sql = f"""
+                WITH Q AS ({cte}),
+                Total AS (SELECT COUNT(*)::INTEGER AS total_count FROM jobs WHERE status = 'queued')
+                SELECT
+                    j.id,
+                    j.requester_tg_id,
+                    j.chat_id,
+                    COALESCE(j.telegram_status_msg_id, j.status_message_id) AS telegram_status_msg_id,
+                    COALESCE(j.initial_queue_pos, q.global_queue_position, 1) AS initial_queue_pos,
+                    q.global_queue_position,
+                    t.total_count AS total_queued,
+                    j.enqueued_at,
+                    COALESCE(j.total_bytes, j.source_size, 0) AS total_bytes,
+                    j.profile,
+                    COALESCE(j.last_reported_queue_pos, 0) AS last_reported_queue_pos,
+                    j.source_filename,
+                    j.output_name,
+                    u.first_name,
+                    u.username
+                FROM jobs j
+                JOIN Q q ON q.id = j.id
+                CROSS JOIN Total t
+                LEFT JOIN users u ON u.tg_id = j.requester_tg_id
+                WHERE j.status = 'queued'
+                  AND (j.telegram_status_msg_id IS NOT NULL OR j.status_message_id IS NOT NULL)
+                  AND q.global_queue_position != COALESCE(j.last_reported_queue_pos, 0)
+                ORDER BY q.global_queue_position ASC
+                LIMIT 15;
+                """
+
+                rows = await self.db.fetch(sql)
+                if not rows:
+                    continue
+
+                for r in rows:
+                    jid = str(r["id"])
+                    chat_id = r["chat_id"] or r["requester_tg_id"]
+                    msg_id = r["telegram_status_msg_id"]
+                    if not chat_id or not msg_id:
+                        continue
+
+                    pos = int(r["global_queue_position"])
+                    init_pos = max(1, int(r["initial_queue_pos"]))
+                    total_q = int(r["total_queued"])
+                    ahead = max(0, pos - 1)
+
+                    raw_pct = (1.0 - (max(1, pos) - 1.0) / float(init_pos)) * 100.0
+                    queue_progress = max(5.0, min(95.0, raw_pct))
+
+                    elapsed = 0.0
+                    enq = r["enqueued_at"]
+                    if enq is not None:
+                        if enq.tzinfo is None:
+                            enq = enq.replace(tzinfo=timezone.utc)
+                        elapsed = max(0.0, (datetime.now(timezone.utc) - enq).total_seconds())
+
+                    wait_cycles = math.ceil(ahead / active_workers)
+                    eta_seconds = wait_cycles * 120.0
+
+                    uname = r["first_name"] or r["username"] or str(r["requester_tg_id"])
+                    card_text = render_stage_0_queued(
+                        active_jobs=self.encode_limiter.active_count,
+                        max_queue=dyn.get_int("max_global_queue_size", 500) if dyn else 500,
+                        total_queued=total_q,
+                        position=pos,
+                        initial_position=init_pos,
+                        jobs_ahead=ahead,
+                        algorithm_fa=ALGORITHM_LABELS_FA.get(mode, mode),
+                        elapsed_seconds=elapsed,
+                        eta_seconds=eta_seconds,
+                        size_bytes=int(r["total_bytes"] or 0),
+                        profile=r["profile"] or "edu480",
+                        user_name=uname,
+                        user_id=r["requester_tg_id"],
+                        job_id=jid,
+                        bar_length=bar_len,
+                    )
+
+                    try:
+                        await self.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=msg_id,
+                            text=card_text,
+                            reply_markup=make_cancel_kb(jid),
+                        )
+                    except TelegramRetryAfter as exc:
+                        log.warning("telegram retry after in queue refresher: %ss", exc.retry_after)
+                        await asyncio.sleep(exc.retry_after + 1)
+                    except TelegramAPIError as exc:
+                        log.debug("telegram edit message failed in queue refresher: %s", exc)
+                    except Exception as exc:
+                        log.warning("unexpected error editing queue card: %s", exc)
+
+                    await self.db.execute(
+                        """
+                        UPDATE jobs
+                        SET last_reported_queue_pos = $2,
+                            stage_progress = $3,
+                            updated_at = now()
+                        WHERE id = $1
+                        """,
+                        r["id"], pos, queue_progress,
+                    )
+                    await asyncio.sleep(0.15)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("error in queue progress refresher loop: %s", exc)
+                await asyncio.sleep(5)
+
     # ------------------------------------------------------------------
     # dispatcher
     # ------------------------------------------------------------------
@@ -814,6 +1016,7 @@ class QueueMixin:
     async def _run_pipeline(self, job_id: str) -> None:
         hb = asyncio.create_task(self._heartbeat(job_id))
         row = None
+        work_dir = Path(self.cfg.media_root) / "work" / str(job_id)
         try:
             row = await self.db.fetchrow(
                 """
@@ -824,81 +1027,86 @@ class QueueMixin:
             if row is None or row["status"] != "processing":
                 return
             await self.update_log_record(job_id, "processing")
-            # 1) download (first moment the source touches the disk)
-            await self._set_stage_ts(job_id, "downloading", "download_started_at")
-            await self.push_stage_card(job_id)
-            try:
-                source = await self._acquire_source(row)
-            except SourceUnavailable as exc:
-                await self._retry_or_fail(row, "download", str(exc)[:200])
-                return
-            await self.db.execute(
-                "UPDATE jobs SET download_done_at = now(), source_path = $2 WHERE id = $1",
-                uuid.UUID(job_id), str(source))
+
+            # 1) download stage (isolated under download_limiter)
+            async with self.download_limiter:
+                await self._set_stage_ts(job_id, "downloading", "download_started_at")
+                await self.push_stage_card(job_id)
+                try:
+                    source = await self._acquire_source(row)
+                except SourceUnavailable as exc:
+                    await self._retry_or_fail(row, "download", str(exc)[:200])
+                    return
+                await self.db.execute(
+                    "UPDATE jobs SET download_done_at = now(), source_path = $2, work_dir = $3 WHERE id = $1",
+                    uuid.UUID(job_id), str(source), str(work_dir))
+
             if not await self._still_mine(job_id):
                 await self._discard_source(job_id, source)
                 return
-            # 2) probe
-            await self._set_stage_ts(job_id, "probing")
-            try:
-                probe = await media_mod.probe_video(source)
-            except media_mod.MediaError as exc:
-                await self.fail_job(row, "invalid_media", str(exc)[:200])
-                await self._discard_source(job_id, source)
-                return
-            size = int(probe.get("size_bytes") or source.stat().st_size)
-            await self.db.execute(
-                """
-                UPDATE media_assets SET size_bytes = $2, duration_s = $3, width = $4,
-                    height = $5, fps = $6, vcodec = $7, acodec = $8, audio_channels = $9,
-                    container = $10, bitrate = $11, probe = $12::jsonb
-                WHERE id = $1
-                """, row["media_id"], size, probe.get("duration_s"), probe.get("width"),
-                probe.get("height"), probe.get("fps"), probe.get("vcodec"),
-                probe.get("acodec"), probe.get("audio_channels"), probe.get("container"),
-                probe.get("bitrate"), json.dumps(probe))
-            await self.push_stage_card(job_id)
-            requester_admin = row["requester_tg_id"] in await self.admin_ids()
-            try:
-                await self.check_duration_limit(row["requester_tg_id"],
-                                                probe.get("duration_s"),
-                                                is_admin=requester_admin)
-            except Exception as exc:  # AdmissionError("too_long")
-                await self.fail_job(row, "too_long", f"duration {probe.get('duration_s')}s: {exc}")
-                await self._discard_source(job_id, source)
-                return
-            # 3) exact duplicate / own output (content hash, before any encode)
-            await self._set_stage_ts(job_id, "checking")
-            sha = row["m_sha"] or await media_mod.sha256_file(source)
-            await self.db.execute("UPDATE media_assets SET sha256 = $2 WHERE id = $1",
-                                  row["media_id"], sha)
-            parts, kind = await self.find_reusable_by_sha(sha)
-            if parts and await self._still_mine(job_id):
-                await self._complete_from_archive(row, parts, kind)
-                await self._discard_source(job_id, source)
-                return
-            if not await self._still_mine(job_id):
-                await self._discard_source(job_id, source)
-                return
-            # 4) decide: compliant sources are remuxed, never re-encoded
-            decision = edu480.decide(probe, size, self.cfg)
-            if decision.action == "encode":
-                guard = edu480.predict_guard(probe, size, self.cfg)
-                if guard is not None:
-                    decision = guard
-            await self.db.execute("UPDATE jobs SET decision = $2 WHERE id = $1",
-                                  uuid.UUID(job_id), f"{decision.action}: {decision.reason}"[:300])
-            log.info("edu480 decision", extra={"job_id": job_id,
-                                                "detail": f"{decision.action} ({decision.reason})"})
-            if not row["fingerprinted"] and self.cfg.similarity_reuse:
-                self.fingerprinter.submit(row["media_id"], str(source), probe.get("duration_s") or 0.0)
-            if decision.action == "remux":
-                await self._run_remux(job_id, source)
-                return
-            if decision.action == "deliver_source":
-                await self._deliver_source(job_id, source, probe)
-                return
-            await self._submit_encode(job_id, row, source, probe)
+
+            # 2) probe, checking & encode stage (isolated under encode_limiter)
+            async with self.encode_limiter:
+                await self._set_stage_ts(job_id, "probing")
+                try:
+                    probe = await media_mod.probe_video(source)
+                except media_mod.MediaError as exc:
+                    await self.fail_job(row, "invalid_media", str(exc)[:200])
+                    await self._discard_source(job_id, source)
+                    return
+                size = int(probe.get("size_bytes") or source.stat().st_size)
+                await self.db.execute(
+                    """
+                    UPDATE media_assets SET size_bytes = $2, duration_s = $3, width = $4,
+                        height = $5, fps = $6, vcodec = $7, acodec = $8, audio_channels = $9,
+                        container = $10, bitrate = $11, probe = $12::jsonb
+                    WHERE id = $1
+                    """, row["media_id"], size, probe.get("duration_s"), probe.get("width"),
+                    probe.get("height"), probe.get("fps"), probe.get("vcodec"),
+                    probe.get("acodec"), probe.get("audio_channels"), probe.get("container"),
+                    probe.get("bitrate"), json.dumps(probe))
+                await self.push_stage_card(job_id)
+                requester_admin = row["requester_tg_id"] in await self.admin_ids()
+                try:
+                    await self.check_duration_limit(row["requester_tg_id"],
+                                                    probe.get("duration_s"),
+                                                    is_admin=requester_admin)
+                except Exception as exc:  # AdmissionError("too_long")
+                    await self.fail_job(row, "too_long", f"duration {probe.get('duration_s')}s: {exc}")
+                    await self._discard_source(job_id, source)
+                    return
+                # 3) exact duplicate / own output (content hash, before any encode)
+                await self._set_stage_ts(job_id, "checking")
+                sha = row["m_sha"] or await media_mod.sha256_file(source)
+                await self.db.execute("UPDATE media_assets SET sha256 = $2 WHERE id = $1",
+                                      row["media_id"], sha)
+                parts, kind = await self.find_reusable_by_sha(sha)
+                if parts and await self._still_mine(job_id):
+                    await self._complete_from_archive(row, parts, kind)
+                    await self._discard_source(job_id, source)
+                    return
+                if not await self._still_mine(job_id):
+                    await self._discard_source(job_id, source)
+                    return
+                # 4) decide: compliant sources are remuxed, never re-encoded
+                decision = edu480.decide(probe, size, self.cfg)
+                if decision.action == "encode":
+                    guard = edu480.predict_guard(probe, size, self.cfg)
+                    if guard is not None:
+                        decision = guard
+                await self.db.execute("UPDATE jobs SET decision = $2 WHERE id = $1",
+                                      uuid.UUID(job_id), f"{decision.action}: {decision.reason}"[:300])
+                log.info("edu480 decision", extra={"job_id": job_id,
+                                                    "detail": f"{decision.action} ({decision.reason})"})
+                if not row["fingerprinted"] and self.cfg.similarity_reuse:
+                    self.fingerprinter.submit(row["media_id"], str(source), probe.get("duration_s") or 0.0)
+                if decision.action == "remux":
+                    await self._run_remux(job_id, source)
+                    return
+                if decision.action == "deliver_source":
+                    await self._deliver_source(job_id, source, probe)
+                    return
+                await self._submit_encode(job_id, row, source, probe)
         except asyncio.CancelledError:
             # Cancelled by moderation / user cancel / shutdown. Status was set
             # by whoever cancelled; on shutdown it stays 'processing' and is

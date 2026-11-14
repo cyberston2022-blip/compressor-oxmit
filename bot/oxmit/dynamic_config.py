@@ -15,6 +15,31 @@ from .log import get_logger
 
 log = get_logger("oxmit.dynamic_config")
 
+# Typed schema: key -> (value_type, default_val, min_val, max_val, allowed_enum_values)
+CONFIG_SCHEMA: dict[str, tuple[str, Any, Any, Any, set[Any] | None]] = {
+    "accepting_new_jobs": ("bool", True, None, None, None),
+    "max_global_queue_size": ("int", 500, 10, 10000, None),
+    "max_concurrent_jobs_per_user": ("int", 3, 1, 50, None),
+    "max_concurrent_jobs_vip": ("int", 10, 1, 100, None),
+    "max_file_size_mb": ("int", 2000, 10, 4000, None),
+    "active_encoding_workers": ("int", 2, 1, 16, None),
+    "active_download_workers": ("int", 4, 1, 20, None),
+    "active_upload_workers": ("int", 4, 1, 20, None),
+    "ffmpeg_threads_per_worker": ("int", 0, 0, 64, None),
+    "queue_scheduling_mode": (
+        "string",
+        "fair_round_robin",
+        None,
+        None,
+        {"fair_round_robin", "weighted_fair", "strict_fifo", "size_aware_fair"},
+    ),
+    "wfq_time_penalty_seconds": ("int", 300, 10, 3600, None),
+    "admin_queue_bypass": ("bool", False, None, None, None),
+    "progress_update_interval_sec": ("int", 4, 1, 60, None),
+    "progress_bar_length": ("int", 12, 5, 30, None),
+    "auto_retry_failed_jobs": ("int", 1, 0, 10, None),
+}
+
 DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
     "accepting_new_jobs": {
         "val": True,
@@ -207,22 +232,53 @@ class DynamicConfig:
         return sorted(items, key=lambda x: x["key"])
 
     async def set(self, key: str, value: Any, admin_tg_id: int | None = None) -> None:
-        """Update a setting in PostgreSQL and update local cache."""
-        meta = DEFAULT_SETTINGS.get(key, {})
-        val_type = meta.get("type", "string")
+        """Update a setting in PostgreSQL and update local cache with strict schema validation."""
+        if key not in CONFIG_SCHEMA:
+            raise ValueError(f"کلید تنظیمات نامعتبر است: {key}")
 
-        # Cast to proper type
+        val_type, default_val, min_val, max_val, allowed_enums = CONFIG_SCHEMA[key]
+        meta = DEFAULT_SETTINGS.get(key, {})
+
+        # Cast to proper type and validate bounds
         if val_type == "bool":
-            if isinstance(value, str):
-                typed_val = value.lower() in ("true", "1", "yes", "on")
+            if isinstance(value, bool):
+                typed_val = value
+            elif isinstance(value, (int, float)):
+                typed_val = bool(value)
+            elif isinstance(value, str):
+                s = value.strip().lower()
+                if s in ("true", "1", "yes", "on"):
+                    typed_val = True
+                elif s in ("false", "0", "no", "off"):
+                    typed_val = False
+                else:
+                    raise ValueError(f"مقدار نامعتبر برای فیلد بولی {key}: {value}")
             else:
                 typed_val = bool(value)
         elif val_type == "int":
-            typed_val = int(value)
+            try:
+                typed_val = int(value)
+            except (ValueError, TypeError):
+                raise ValueError(f"مقدار {key} باید یک عدد صحیح باشد")
+            if min_val is not None and typed_val < min_val:
+                raise ValueError(f"مقدار {key} نمی‌تواند کمتر از {min_val} باشد")
+            if max_val is not None and typed_val > max_val:
+                raise ValueError(f"مقدار {key} نمی‌تواند بیشتر از {max_val} باشد")
         elif val_type == "float":
-            typed_val = float(value)
-        else:
-            typed_val = str(value)
+            try:
+                typed_val = float(value)
+            except (ValueError, TypeError):
+                raise ValueError(f"مقدار {key} باید یک عدد اعشاری باشد")
+            if min_val is not None and typed_val < min_val:
+                raise ValueError(f"مقدار {key} نمی‌تواند کمتر از {min_val} باشد")
+            if max_val is not None and typed_val > max_val:
+                raise ValueError(f"مقدار {key} نمی‌تواند بیشتر از {max_val} باشد")
+        else:  # string
+            typed_val = str(value).strip()
+            if allowed_enums is not None and typed_val not in allowed_enums:
+                raise ValueError(
+                    f"مقدار انتخابی برای {key} نامعتبر است (مجاز: {', '.join(sorted(allowed_enums))})"
+                )
 
         json_val = json.dumps(typed_val)
         await self.db.execute(

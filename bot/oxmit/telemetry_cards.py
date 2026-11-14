@@ -250,3 +250,22 @@ def render_stage_complete(
         f"⏱️ کل زمان پردازش: {fmt_duration_fa(elapsed_seconds)}\n"
         f"🆔 شناسه تسک: #{short_id}"
     )
+
+
+def render_stage_cancelled(
+    *,
+    filename: str = "",
+    elapsed_seconds: float = 0.0,
+    job_id: str = "",
+) -> str:
+    """Final cancellation summary card."""
+    short_id = str(job_id)[:8]
+    elapsed_str = fmt_duration_fa(elapsed_seconds)
+    file_info = f"🎞️ فایل: {filename}\n" if filename else ""
+
+    return (
+        f"❌ پردازش ویدیو لغو گردید.\n\n"
+        f"{file_info}"
+        f"⏱️ زمان سپری‌شده: {elapsed_str}\n"
+        f"🆔 شناسه تسک: #{short_id}"
+    )

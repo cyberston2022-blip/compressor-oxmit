@@ -2953,9 +2953,37 @@ class JobEngine(QueueMixin):
             await asyncio.to_thread(_rm, Path(self.cfg.media_incoming) / job_id)
         if not keep_output:
             await asyncio.to_thread(_rm, Path(self.cfg.media_out) / job_id)
+        work_dir = Path(self.cfg.media_root) / "work" / job_id
+        await asyncio.to_thread(_rm, work_dir)
         thumb_path = Path(self.cfg.media_tmp) / f"thumb-{job_id[:12]}.jpg"
         if thumb_path.is_file():
             await asyncio.to_thread(thumb_path.unlink, True)
+
+    async def _orphan_disk_cleanup_loop(self) -> None:
+        """Periodic background garbage collector: scans /media/work/* and temporary dirs
+        every 15 minutes, cross-checking folder UUIDs against active jobs and purging orphaned directories.
+        Also enforces the 5 GB Emergency Disk Guard."""
+        log.info("orphan disk cleanup loop started")
+        while True:
+            try:
+                await asyncio.sleep(900)  # 15 minutes
+                await self.cleanup_sweep()
+                free_bytes = self._disk_free()
+                free_gb = free_bytes / (1024 ** 3)
+                if free_gb < 5.0:
+                    dyn = getattr(self, "dynamic_config", None)
+                    if dyn and dyn.get_bool("accepting_new_jobs", True):
+                        await dyn.set("accepting_new_jobs", False)
+                        log.warning("emergency disk guard triggered: free_gb=%.2f < 5.0GB; paused new jobs", free_gb)
+                        try:
+                            await self.notify_admins(f"⚠️ آستانه اضطراری دیسک ({free_gb:.1f} GB باقی‌مانده)! پذیرش کارهای جدید متوقف شد.")
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.exception("error in orphan disk cleanup loop: %s", exc)
+                await asyncio.sleep(60)
 
     async def cleanup_sweep(self) -> None:
         active = await self.db.fetch(
