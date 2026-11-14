@@ -1,9 +1,18 @@
 """Deterministic output-size and encode-time estimates.
 
-Independent implementation of the public bits-per-pixel size heuristics for
-x264/x265 (the bpp-vs-CRF rule of thumb: ~0.12 bpp at CRF 23, ~-13% per CRF
-point; codec/preset factors from public encoder benchmarks). Returns a
+Bits-per-pixel size model for x264/x265: base bpp at CRF 23 scaled by
+~-13% per CRF point and a codec factor (hevc ~= 0.55 of h264). Returns a
 (low, high) range so the UI can honestly present it as an estimate.
+
+CALIBRATION (2026-11-14, production Ohio): the old generic rule of thumb
+(~0.12 bpp at CRF 23) over-predicted real EDU480 output by 2-4x for actual
+Telegram/lecture content - the predictive no-gain guard then skipped
+encodes that really compressed 25-75% (23% of production jobs came back
+uncompressed). Measured from 15 completed production jobs (2.27GB output
+over 529G px-seconds at CRF 25 veryfast => 0.036 bpp) plus controlled
+benchmarks on real owner sources: the base bpp at CRF 23 is set to the
+measured HIGH edge (0.055 => ~0.042 at CRF 25) so the guard stays
+conservative without over-firing.
 
 Pure helpers - no I/O. Every public function is total: it never raises and
 always returns a well-formed (low, high) with low <= high, or (0, 0).
@@ -11,6 +20,11 @@ always returns a well-formed (low, high) with low <= high, or (0, 0).
 from __future__ import annotations
 
 import math
+
+# bpp at CRF 23 for h264 (hevc scales by _CODEC_BPP factor). Calibrated
+# against production output; override per-call via estimate_output_bytes
+# (config ESTIMATE_BPP_H264 flows through edu480.predict_guard).
+DEFAULT_BPP_H264 = 0.055
 
 _PIXELS_1080P = 1920.0 * 1080.0
 _ASSUMED_FPS = 30.0
@@ -67,11 +81,13 @@ def output_pixels(src_w: int | None, src_h: int | None,
 
 def estimate_output_bytes(duration_s, out_pixels: float, codec: str, crf: int,
                           audio_kbps: float = 128.0,
-                          source_bytes: int = 0) -> tuple[int, int]:
+                          source_bytes: int = 0,
+                          bpp_base: float | None = None) -> tuple[int, int]:
     duration = _duration(duration_s)
     if duration is None or out_pixels <= 0:
         return (0, 0)
-    bpp = 0.12 * (0.87 ** (_crf(crf) - 23)) * _CODEC_BPP.get(codec, 1.0)
+    base = bpp_base if bpp_base is not None and bpp_base > 0 else DEFAULT_BPP_H264
+    bpp = base * (0.87 ** (_crf(crf) - 23)) * _CODEC_BPP.get(codec, 1.0)
     audio = min(max(audio_kbps, 0.0), 1024.0)
     point = (bpp * (out_pixels / _PIXELS_1080P) * _PIXELS_1080P
              * _ASSUMED_FPS * duration + audio * 1000.0 * duration) / 8.0

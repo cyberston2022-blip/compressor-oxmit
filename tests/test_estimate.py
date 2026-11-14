@@ -29,6 +29,30 @@ def test_source_floor_and_ceiling():
     assert high <= (10 << 20) * 3.0 + 1
 
 
+def test_h264_bpp_calibrated_to_production():
+    # 2026-11-14 calibration: 0.055 bpp at CRF 23 (~0.042 at CRF 25), set to
+    # the measured HIGH edge from 15 production jobs (0.036 bpp at CRF 25).
+    # A 1-hour 854x480@25 lecture must predict ~0.15-0.22 GB low edge -
+    # the old generic 0.12 bpp rule predicted ~0.5 GB and caused no-gain
+    # skips of files that really compressed 25-75%.
+    low, high = estimate_output_bytes(
+        3600.0, 854 * 480, "h264", 25, audio_kbps=64, source_bytes=0)
+    assert 150_000_000 <= low <= 220_000_000
+    assert low < high
+
+
+def test_bpp_base_override_is_honored():
+    # edu480.predict_guard passes cfg.estimate_bpp_h264 through; a large
+    # base must raise the prediction (conservative guard), a tiny one lower it.
+    mid, _ = estimate_output_bytes(600.0, 854 * 480, "h264", 25,
+                                   audio_kbps=64, source_bytes=0)
+    big, _ = estimate_output_bytes(600.0, 854 * 480, "h264", 25,
+                                   audio_kbps=64, source_bytes=0, bpp_base=0.30)
+    tiny, _ = estimate_output_bytes(600.0, 854 * 480, "h264", 25,
+                                    audio_kbps=64, source_bytes=0, bpp_base=0.01)
+    assert tiny[0] < mid[0] < big[0]
+
+
 def test_format_helpers():
     text = format_size_range(1000, 2000)
     assert "1000" in text or "KB" in text

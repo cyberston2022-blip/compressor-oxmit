@@ -161,7 +161,10 @@ class Settings:
     support_session_min: int = 10
 
     # ---- EDU480 (the single active compression profile) ----
-    edu480_crf: int = 25
+    # CRF 28 veryfast is the 2026-11-14 benchmark winner on real owner
+    # sources: -26% size vs CRF 25 at identical encode speed (SSIM -0.005);
+    # slower presets bought no size on lecture content and cost 25-40% CPU.
+    edu480_crf: int = 28
     edu480_preset: str = "veryfast"
     edu480_scale_flags: str = "lanczos"
     edu480_max_fps: float = 30.0
@@ -170,9 +173,14 @@ class Settings:
     # low edge of the predicted EDU480 output reaches this fraction of the
     # source, the pipeline delivers the source instead of encoding. It is a
     # GUARD only — it can only skip encodes that the model is confident are
-    # useless, never reject useful ones (cold-start safe).
+    # useless, never reject useful ones (cold-start safe). v2: calibrated
+    # bpp (see estimate.py) and never fires when a real downscale happens.
     encode_predict_guard: bool = True
     predict_no_gain_ratio: float = 0.98
+    # bpp at CRF 23 for the size model. Calibrated 2026-11-14 from 15 real
+    # production encodes (0.036 bpp measured at CRF 25) + benchmarks; set to
+    # the measured high edge so the guard stays conservative.
+    estimate_bpp_h264: float = 0.055
     # Sources already <=480p, H.264 + AAC, <= this video bitrate and <= the
     # fps cap are compliant: they are remuxed (stream copy), not re-encoded.
     edu480_compliant_kbps: int = 700
@@ -289,6 +297,8 @@ class Settings:
             errs.append(f"ENCODE_SLOTS={self.encode_slots} outside 0..32")
         if not 18 <= self.edu480_crf <= 35:
             errs.append(f"EDU480_CRF={self.edu480_crf} outside 18..35")
+        if not 0.005 <= self.estimate_bpp_h264 <= 0.30:
+            errs.append(f"ESTIMATE_BPP_H264={self.estimate_bpp_h264} outside 0.005..0.30")
         if not 0.5 <= self.predict_no_gain_ratio <= 1.2:
             errs.append(f"PREDICT_NO_GAIN_RATIO={self.predict_no_gain_ratio} outside 0.5..1.2")
         if self.edu480_preset not in ("ultrafast", "superfast", "veryfast", "faster",
@@ -433,7 +443,7 @@ def load_settings() -> Settings:
             _PARSE_ERRORS.append(f"LOG_CHANNEL_ID: expected integer, got {lc!r}")
     s.naming_timeout_min = _int("NAMING_TIMEOUT_MIN", 30)
     s.support_session_min = _int("SUPPORT_SESSION_MIN", 10)
-    s.edu480_crf = _int("EDU480_CRF", 25)
+    s.edu480_crf = _int("EDU480_CRF", 28)
     s.edu480_preset = os.getenv("EDU480_PRESET", "veryfast").strip().lower()
     s.edu480_scale_flags = os.getenv("EDU480_SCALE_FLAGS", "lanczos").strip().lower()
     s.edu480_max_fps = _float("EDU480_MAX_FPS", 30.0)
@@ -441,6 +451,7 @@ def load_settings() -> Settings:
     s.edu480_compliant_kbps = _int("EDU480_COMPLIANT_KBPS", 700)
     s.encode_predict_guard = _bool("ENCODE_PREDICT_GUARD", True)
     s.predict_no_gain_ratio = _float("PREDICT_NO_GAIN_RATIO", 0.98)
+    s.estimate_bpp_h264 = _float("ESTIMATE_BPP_H264", 0.055)
 
     errs = s.validate()
     if os.getenv("OXMIT_SKIP_VALIDATION", "") != "1" and errs:

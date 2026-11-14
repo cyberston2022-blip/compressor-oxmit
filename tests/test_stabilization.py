@@ -270,10 +270,11 @@ async def test_reuse_archive_returns_without_delivering_inline(engine, fake_db):
 class GuardCfg:
     encode_predict_guard = True
     predict_no_gain_ratio = 0.98
-    edu480_crf = 25
+    edu480_crf = 28
     edu480_audio_kbps = 64
     edu480_max_fps = 30
     edu480_compliant_kbps = 700
+    estimate_bpp_h264 = 0.055
 
 
 def _probe(w, h, fps, dur, video_kbps):
@@ -283,16 +284,37 @@ def _probe(w, h, fps, dur, video_kbps):
 
 
 def test_predict_guard_1080p_high_bitrate_still_encodes():
-    # 1080p60 6 Mbps: EDU480 predicted output is far below the source.
+    # 1080p 6 Mbps: a real downscale happens -> the guard never skips (v2).
     probe = _probe(1920, 1080, 30, 600.0, 6000)
     decision = edu480.predict_guard(probe, 450_000_000, GuardCfg())
     assert decision is None
 
 
-def test_predict_guard_low_bpp_480p_delivers_source():
-    # 480p at ~800 kbps: EDU480 target bitrate is ~ the same -> no-gain.
+def test_predict_guard_never_fires_on_downscale_sources():
+    # v2: downscaled sources compressed to 25-58% of source in production,
+    # so even an extremely lean 720p lecture is always encoded (the
+    # post-encode NO_GAIN_THRESHOLD check remains the backstop). The old
+    # generic bpp rule skipped exactly these files - the owner's complaint.
+    probe = _probe(1280, 720, 25, 6883.0, 100)
+    decision = edu480.predict_guard(probe, 719_763_068, GuardCfg())
+    assert decision is None
+
+
+def test_predict_guard_calibrated_model_encodes_typical_480p():
+    # <=480p source routed to encode (bitrate above compliant threshold):
+    # the calibrated model predicts an output far below the source, so the
+    # encode happens (the old generic 0.12 bpp rule returned exactly these
+    # files uncompressed).
     probe = _probe(854, 480, 30, 60.0, 800)
-    size = int(800 * 1000 / 8 * 60)   # ~6 MB
+    size = int(800 * 1000 / 8 * 60)
+    assert edu480.predict_guard(probe, size, GuardCfg()) is None
+
+
+def test_predict_guard_extreme_lean_480p_corner_still_guarded():
+    # direct-call corner: <=480p, no downscale, predicted low edge still
+    # >= ratio * source (raised ESTIMATE_BPP_H264 or a very lean source).
+    probe = _probe(854, 480, 30, 60.0, 140)
+    size = int(140 * 1000 / 8 * 60)   # ~1.05 MB
     decision = edu480.predict_guard(probe, size, GuardCfg())
     assert decision is not None
     assert decision.action == "deliver_source"
@@ -302,13 +324,13 @@ def test_predict_guard_low_bpp_480p_delivers_source():
 def test_predict_guard_disabled():
     cfg = GuardCfg()
     cfg.encode_predict_guard = False
-    probe = _probe(854, 480, 30, 60.0, 800)
-    size = int(800 * 1000 / 8 * 60)
+    probe = _probe(854, 480, 30, 60.0, 140)
+    size = int(140 * 1000 / 8 * 60)
     assert edu480.predict_guard(probe, size, cfg) is None
 
 
 def test_predict_guard_never_fires_on_unknown_size():
-    probe = _probe(854, 480, 30, 60.0, 800)
+    probe = _probe(854, 480, 30, 60.0, 140)
     assert edu480.predict_guard(probe, 0, GuardCfg()) is None
 
 

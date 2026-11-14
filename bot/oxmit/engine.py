@@ -964,7 +964,7 @@ class JobEngine(QueueMixin):
                 preset = str(profile_params.get("preset") or preset)
         out_pixels = est.output_pixels(probe.get("width"), probe.get("height"), target_short)
         src_bytes = int(probe.get("size_bytes") or 0)
-        audio = 96.0 if (target_short or 0) <= 480 else 128.0
+        audio = 64.0 if (target_short or 0) <= 480 else 128.0
         low, high = est.estimate_output_bytes(
             probe.get("duration_s"), out_pixels, codec, crf,
             audio_kbps=audio, source_bytes=src_bytes,

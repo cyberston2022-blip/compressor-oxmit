@@ -5,9 +5,11 @@ throughput-based waiting-time estimates).
 Everything here is deterministic and side-effect free so it is unit-tested
 directly; engine.py wires it into the job lifecycle.
 
-EDU480 definition (profile version 2):
-- H.264 (libx264), CRF ``EDU480_CRF`` (25), preset ``EDU480_PRESET``
-  (veryfast), aq-mode 3, yuv420p, MP4 + faststart.
+EDU480 definition (profile version 2, encoder point retuned 2026-11-14):
+- H.264 (libx264), CRF ``EDU480_CRF`` (28 — benchmarked on real owner
+  sources: -26% size vs CRF 25 at identical encode speed and SSIM -0.005),
+  preset ``EDU480_PRESET`` (veryfast — measured fastest AND smallest at
+  equal CRF on lecture workloads), aq-mode 3, yuv420p, MP4 + faststart.
 - Resolution: the SHORT side is scaled to 480 with Lanczos, aspect ratio is
   preserved, both dimensions are even, and nothing is ever upscaled. Portrait
   sources therefore become 480 px wide (not 854 px wide as the old fixed-
@@ -285,32 +287,46 @@ def fmt_eta_range_fa(low: int, high: int) -> str:
 
 
 def predict_guard(probe: dict, size_bytes: int, cfg) -> Decision | None:
-    """Deterministic predictive no-gain guard (V3 §16 — no ML, no history).
+    """Deterministic predictive no-gain guard (V3 §16 — no ML, no history),
+    v2: production-calibrated model + no-downscale restriction.
 
-    Returns a ``deliver_source`` Decision when the LOW edge of the predicted
-    EDU480 output reaches ``cfg.predict_no_gain_ratio`` of the source size —
-    i.e. when encoding is confidently useless. The guard can only SKIP
-    encodes the model is confident about; it never fires on unknown sizes
-    and never rejects a useful encode (cold-start safe by construction).
+    The old generic bpp rule of thumb over-predicted real output 2-4x and
+    returned 23% of production jobs (incl. every large file) uncompressed.
+    v2 changes:
+    * Sources whose short side exceeds 480 (i.e. a real downscale happens)
+      are NEVER skipped: measured production encodes of downscaled sources
+      land at 25-58% of source, so encoding always helps. The post-encode
+      ``NO_GAIN_THRESHOLD`` check remains the backstop for freak cases.
+    * The size model uses the production-calibrated bpp (ESTIMATE_BPP_H264),
+      so the remaining guard corner (<=480p sources routed to encode because
+      their bitrate is above the compliant threshold) is predicted honestly.
     """
     if not getattr(cfg, "encode_predict_guard", True):
         return None
     if not size_bytes:
         return None  # unknown source size: never guess (V3 §16)
+    w, h = probe.get("width"), probe.get("height")
+    try:
+        downscale = bool(w and h and min(int(w), int(h)) > MAX_SHORT_SIDE)
+    except (TypeError, ValueError):
+        downscale = False
+    if downscale:
+        return None  # a real downscale always shrinks; never skip (see docstring)
     ratio = getattr(cfg, "predict_no_gain_ratio", 0.98)
     from . import estimate as estimate_mod  # local import: estimate is leaf-level
 
     predicted_low, predicted_high = estimate_mod.estimate_output_bytes(
         probe.get("duration_s"),
         estimate_mod.output_pixels(probe.get("width"), probe.get("height"), MAX_SHORT_SIDE),
-        "h264", getattr(cfg, "edu480_crf", 25),
+        "h264", getattr(cfg, "edu480_crf", 28),
         audio_kbps=getattr(cfg, "edu480_audio_kbps", 64),
         source_bytes=size_bytes,
+        bpp_base=getattr(cfg, "estimate_bpp_h264", None),
     )
     if predicted_low > 0 and predicted_low >= size_bytes * ratio:
         return Decision(
             "deliver_source",
-            f"predictive no-gain (deterministic bpp guard v1): EDU480 output "
+            f"predictive no-gain (deterministic bpp guard v2, calibrated): EDU480 output "
             f"~{estimate_mod.format_size_range(predicted_low, predicted_high)} vs source "
             f"{size_bytes} bytes (>= {ratio:.0%} of source)",
         )

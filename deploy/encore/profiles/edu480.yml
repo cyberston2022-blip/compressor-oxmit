@@ -18,7 +18,7 @@ encodes:
       - "#{profileParams['vf'] ?: 'scale=-2:''min(480,ih)'':flags=lanczos'}"
       - "#{profileParams['fpsf'] ?: 'null'}"
     params:
-      crf: "#{profileParams['crf'] ?: '25'}"
+      crf: "#{profileParams['crf'] ?: '28'}"
       preset: "#{profileParams['preset'] ?: 'veryfast'}"
       threads: "#{profileParams['threads'] ?: '4'}"
       aq-mode: "3"
