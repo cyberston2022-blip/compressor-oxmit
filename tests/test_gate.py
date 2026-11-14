@@ -8,6 +8,8 @@ on API errors), the recheck flow, and panel config validation.
 import time
 from types import SimpleNamespace
 
+from aiogram.exceptions import TelegramBadRequest
+
 from oxmit.gate import (
     ChannelGateMiddleware,
     GateService,
@@ -68,6 +70,8 @@ class StubBot:
     async def get_chat_member(self, chat_id, user_id):
         self.member_calls += 1
         status = self.members.get((int(chat_id), int(user_id)))
+        if isinstance(status, str) and status.startswith("BADREQ:"):
+            raise TelegramBadRequest(method=None, message=status[7:])
         if status == "ERROR":
             raise RuntimeError("Telegram API hiccup")
         if status is None:
@@ -256,6 +260,8 @@ async def test_is_member_verdicts():
         (-100555, 6): "kicked",
         (-100555, 7): "ERROR",
         (-100555, 8): None,  # not found -> unknown? raises -> None
+        (-100555, 9): "BADREQ: Bad Request: PARTICIPANT_ID_INVALID",
+        (-100555, 10): "BADREQ: Bad Request: USER_NOT_PARTICIPANT",
     })
     assert await gate.is_member(bot, 1) is True
     assert await gate.is_member(bot, 2) is True
@@ -265,6 +271,12 @@ async def test_is_member_verdicts():
     assert await gate.is_member(bot, 6) is False
     assert await gate.is_member(bot, 7) is None
     assert await gate.is_member(bot, 8) is None
+    # unresolvable users can never be members -> definite False, cached
+    assert await gate.is_member(bot, 9) is False
+    assert await gate.is_member(bot, 10) is False
+    calls = bot.member_calls
+    assert await gate.is_member(bot, 9) is False
+    assert bot.member_calls == calls
 
 
 async def test_membership_cache_avoids_api_calls():

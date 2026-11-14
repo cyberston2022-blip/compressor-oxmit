@@ -26,6 +26,7 @@ import time
 
 from aiogram import Bot, BaseMiddleware, Router, F
 from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -222,6 +223,18 @@ class GateService:
             return None
         try:
             member = await bot.get_chat_member(int(cid), int(tg_id))
+        except TelegramBadRequest as exc:
+            msg = str(exc)
+            # Telegram cannot resolve the user at all (or they were never a
+            # participant) - such a user can never be a channel member.
+            if "PARTICIPANT_ID_INVALID" in msg or "USER_NOT_PARTICIPANT" in msg:
+                if len(self._cache) > self.MAX_CACHE:
+                    self._cache.clear()
+                self._cache[int(tg_id)] = (False, now + self.NONMEMBER_TTL)
+                return False
+            log.warning("gate membership check failed",
+                        extra={"detail": f"tg_id={tg_id} {msg[:80]}"})
+            return None
         except Exception:  # noqa: BLE001 - transient API / bot-not-admin
             log.warning("gate membership check failed",
                         extra={"detail": f"tg_id={tg_id}"})
