@@ -195,8 +195,9 @@ async def test_secondary_link_falls_back_to_admin_verification():
     bot = StubBot(chats={-100777: StubChat(-100777, invite_link=SimpleNamespace(
         invite_link="https://t.me/+primaryXX"))},
         members={(-100777, 999000111): "administrator"})
-    assert await gate.verify_candidate(bot, -100777) is False       # strict only
-    assert await gate.note_channel_event(bot, -100777) is True      # admin fallback
+    # unified fallback: works for both channel events and owner forwards
+    assert await gate.verify_candidate(bot, -100777) is True
+    assert await gate.note_channel_event(bot, -100777) is True
     assert state.gate_channel_id == "-100777"
 
 
