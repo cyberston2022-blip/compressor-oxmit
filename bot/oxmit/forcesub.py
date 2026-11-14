@@ -74,3 +74,15 @@ def join_markup(conf: dict, lang: str = "fa") -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text=tr("fsub_btn_check", lang),
                                       callback_data="fsub:check")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def promo_row(conf: dict, lang: str = "fa") -> list[InlineKeyboardButton] | None:
+    """Non-blocking channel-promotion button row for the /start keyboard.
+
+    Shown whenever a channel link is configured — even while enforcement
+    (``enabled``) is off — so the channel stays visible without gating.
+    """
+    if conf.get("link"):
+        return [InlineKeyboardButton(text=tr("fsub_btn_channel", lang),
+                                     url=conf["link"])]
+    return None

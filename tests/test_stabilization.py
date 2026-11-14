@@ -343,6 +343,40 @@ def test_edu480_compliant_source_is_remux_not_guard():
 
 
 # ---------------------------------------------------------------------------
+# channel promotion via native force-sub (custom gate middleware removed;
+# joining is never required unless the owner arms force_sub in /admin)
+# ---------------------------------------------------------------------------
+
+class _CfgDB:
+    def __init__(self, cfg):
+        self.cfg = cfg
+
+    async def get_config(self, key):
+        return self.cfg.get(key)
+
+
+async def test_forcesub_current_reads_prefilled_disabled_channel():
+    from oxmit import forcesub
+    db = _CfgDB({"force_sub": {"enabled": False, "channel_id": -1003776739475,
+                               "link": "https://t.me/days11s"}})
+    conf = await forcesub.current(db)
+    assert conf["enabled"] is False
+    assert conf["channel_id"] == -1003776739475
+    assert conf["link"] == "https://t.me/days11s"
+    # disabled enforcement never blocks
+    assert await forcesub.gate(type("E", (), {"bot": None})(), db, 123) is None
+
+
+def test_promo_row_present_when_link_configured_even_if_disabled():
+    from oxmit import forcesub
+    row = forcesub.promo_row({"enabled": False, "channel_id": -1003776739475,
+                              "link": "https://t.me/days11s"})
+    assert row is not None
+    assert row[0].url == "https://t.me/days11s"
+    assert forcesub.promo_row({"enabled": False, "link": None}) is None
+
+
+# ---------------------------------------------------------------------------
 # FIX-3: panel config API is allowlisted (no arbitrary app_config writes,
 # no private identifiers echoed to the browser)
 # ---------------------------------------------------------------------------

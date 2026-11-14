@@ -15,7 +15,6 @@ from .config import load_settings
 from .db import Database
 from .encore_client import EncoreClient
 from .engine import JobEngine
-from .gate import ChannelGateMiddleware, GateService, build_gate_router
 from .handlers import admin, adminpanel, intake, menu, settings
 from .handlers import merge_flow, moderation, nav, owner, personal, support
 from .internal_api import start_internal_api
@@ -124,10 +123,6 @@ async def main() -> None:
         state.access_mode = db_mode
     else:
         state.access_mode = "private" if cfg.owner_only else "public"
-    # channel-membership gate (force-join): DB-authoritative target + id
-    state.gate_channel = str(await db.get_config("gate_channel") or "")
-    state.gate_channel_id = str(await db.get_config("gate_channel_id") or "")
-    gate = GateService(db, state)
 
     try:
         me = await bot.get_me()
@@ -139,15 +134,6 @@ async def main() -> None:
         "bot online via local bot api server",
         extra={"detail": f"@{state.bot_username} archive={state.archive_channel_id}"},
     )
-    # Best-effort gate resolution at boot: numeric/@username targets resolve
-    # immediately; invite links resolve later from channel events or an
-    # owner forward (never blocks startup).
-    try:
-        if gate.active:
-            cid = await gate.resolve(bot)
-            log.info("gate resolve", extra={"detail": f"resolved={bool(cid)}"})
-    except Exception:  # noqa: BLE001
-        log.exception("gate resolve failed at startup")
 
     api_runners = await start_internal_api(engine, db, cfg, state, redis_client, port=8080)
 
@@ -164,16 +150,7 @@ async def main() -> None:
     owner_mw = OwnerOnlyMiddleware(cfg, state)
     dp.message.outer_middleware(owner_mw)
     dp.callback_query.outer_middleware(owner_mw)
-    # Gate AFTER OwnerOnly: in private mode non-owners never reach it; in
-    # public mode it is the only barrier between channel members and bots.
-    gate_mw = ChannelGateMiddleware(cfg, state, gate)
-    dp.message.outer_middleware(gate_mw)
-    dp.callback_query.outer_middleware(gate_mw)
 
-    # Gate router FIRST: its capture handlers (channel_post/chat_member/
-    # owner forward) and gate:recheck callback must win over intake's
-    # channel_post archive-discovery handler.
-    dp.include_router(build_gate_router(engine, db, cfg, state, gate))
     dp.include_router(menu.build_router(engine, db, cfg, state))
     # Support BEFORE every other message consumer: an explicitly opened
     # contact session / an owner reply must not be swallowed by intake or
@@ -210,10 +187,7 @@ async def main() -> None:
     try:
         await dp.start_polling(
             bot,
-            # chat_member: gate resolution capture for private channels
-            # (join/leave events of the gate channel); no second poller.
-            allowed_updates=["message", "callback_query", "channel_post",
-                             "chat_member"],
+            allowed_updates=["message", "callback_query", "channel_post"],
         )
     finally:
         for t in background:

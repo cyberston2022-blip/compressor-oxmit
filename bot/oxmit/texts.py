@@ -38,73 +38,10 @@ T: dict[str, dict[str, str]] = {
         "fa": "🎓 فشرده‌سازی ویدیوی آموزشی (حداقل حجم + ۴۸۰p/۳۶۰p)",
         "en": "🎓 Educational Video Compression (Lowest size + 480p/360p)",
     },
-    # ---- channel-membership gate (force-join) ----
-    "gate_join_required": {
-        "fa": (
-            "🔒 استفاده از ربات فقط برای اعضای چنل ما امکان‌پذیر است.\n\n"
-            "اول با دکمهٔ زیر عضو چنل شو، بعد دکمهٔ «✅ بررسی عضویت» را بزن "
-            "و ویدیوی خود را ارسال کن."
-        ),
-        "en": (
-            "🔒 This bot is only available to members of our channel.\n\n"
-            "Join via the button below, then press \"✅ Check membership\" "
-            "and send your video."
-        ),
-    },
-    "gate_btn_join": {"fa": "📢 عضویت در چنل", "en": "📢 Join the channel"},
-    "gate_btn_check": {"fa": "✅ بررسی عضویت", "en": "✅ Check membership"},
-    "gate_membership_ok": {
-        "fa": "✅ عضویت شما تأیید شد! حالا می‌توانی ویدیو را بفرستی.",
-        "en": "✅ Membership confirmed! You can now send your video.",
-    },
-    "gate_not_member_yet": {
-        "fa": "⚠️ هنوز عضو چنل نشده‌ای. اول با دکمهٔ زیر عضو شو و دوباره تلاش کن.",
-        "en": "⚠️ You are not a channel member yet. Join first and retry.",
-    },
-    "gate_check_error": {
-        "fa": (
-            "⏳ بررسی عضویت موقتاً ناموفق بود. چند لحظه بعد دوباره تلاش کن.\n"
-            "(اگر مدت‌هاست عضو چنل هستی و این پیام تکرار شد، به مالک اطلاع بده)"
-        ),
-        "en": "⏳ Membership check temporarily failed. Please retry shortly.",
-    },
-    "gate_status": {
-        "fa": "🚪 وضعیت گیت چنل:\nهدف: {target}\nنوع: {kind}\nشناسهٔ چنل: {cid}\nفعال: {active}\n\nدستورها: /gate set <لینک|@نام|شناسه> — /gate check — /gate off",
-        "en": "🚪 Gate status:\nTarget: {target}\nKind: {kind}\nChannel id: {cid}\nActive: {active}\n\nCommands: /gate set <link|@name|id> — /gate check — /gate off",
-    },
-    "gate_set_ok": {
-        "fa": "✅ گیت ثبت شد (نوع {kind}: {value}). حالا اتصال به چنل بررسی می‌شود…",
-        "en": "✅ Gate target saved (kind {kind}: {value}). Resolving…",
-    },
-    "gate_set_invalid": {
-        "fa": "⚠️ مقدار نامعتبر است. لینک دعوت (t.me/+…)، @نام کاربری یا شناسهٔ عددی چنل بده.",
-        "en": "⚠️ Invalid value. Provide an invite link (t.me/+…), @username, or numeric chat id.",
-    },
-    "gate_off_done": {
-        "fa": "🔓 گیت چنل غیرفعال شد؛ همه می‌توانند از ربات استفاده کنند.",
-        "en": "🔓 Gate disabled; the bot is open to everyone.",
-    },
-    "gate_resolved": {
-        "fa": "🔗 چنل گیت متصل شد (شناسه {cid}). بررسی عضویت خودت: {verdict}",
-        "en": "🔗 Gate channel resolved (id {cid}). Your own membership: {verdict}",
-    },
-    "gate_unresolved": {
-        "fa": (
-            "⏳ اتصال لینک به چنل هنوز انجام نشده. Bot API لینک دعوت را مستقیم به شناسه تبدیل نمی‌کند؛ "
-            "یک پیام در چنل بفرست یا هر پیامی از چنل را به همین ربات فوروارد کن تا خودکار متصل شود."
-        ),
-        "en": (
-            "⏳ Gate channel not resolved yet. Post anything in the channel or "
-            "forward any channel message to this bot to resolve it automatically."
-        ),
-    },
-    "gate_capture_ok": {
-        "fa": "✅ چنل گیت متصل شد (شناسهٔ ثبت‌شده: {cid}). گیت از این لحظه فعال است.",
-        "en": "✅ Gate channel resolved (id: {cid}). The gate is now active.",
-    },
-    "gate_capture_mismatch": {
-        "fa": "⚠️ این پیام با چنل هدف گیت مطابقت ندارد.",
-        "en": "⚠️ This message does not match the configured gate channel.",
+    # ---- channel promotion (non-blocking; link comes from force_sub conf) ----
+    "fsub_btn_channel": {
+        "fa": "📢 چنل ما",
+        "en": "📢 Our channel",
     },
     "btn_edu_compress_cut": {
         "fa": "🎓 فشرده‌سازی آموزشی ({cut}٪ کاهش حجم! | {res})",

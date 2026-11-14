@@ -48,14 +48,20 @@ def build_router(engine, db, cfg, state) -> Router:
             return
         if not state.archive_channel_id and admin_user:
             await message.answer(tr("archive_setup_admin", lang))
+        kb_rows = [
+            [InlineKeyboardButton(text=tr("btn_contact", lang), callback_data="sup:open")],
+            [InlineKeyboardButton(text=tr("btn_myjobs", lang), callback_data="menu:jobs"),
+             InlineKeyboardButton(text=tr("btn_menu", lang), callback_data="menu:home")],
+        ]
+        # Non-blocking channel promotion: show the configured channel even
+        # while force-sub enforcement is off (joining is never required).
+        promo = forcesub.promo_row(await forcesub.current(db), lang)
+        if promo:
+            kb_rows.append(promo)
         await message.answer(
             tr("welcome2", lang, name=message.from_user.first_name or "",
                max_gb=cfg.max_source_bytes // 1024**3),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=tr("btn_contact", lang), callback_data="sup:open")],
-                [InlineKeyboardButton(text=tr("btn_myjobs", lang), callback_data="menu:jobs"),
-                 InlineKeyboardButton(text=tr("btn_menu", lang), callback_data="menu:home")],
-            ]),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
         )
 
     @router.message(F.text.startswith("/panel"))
