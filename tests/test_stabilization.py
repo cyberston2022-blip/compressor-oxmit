@@ -633,3 +633,96 @@ async def test_redeliver_marks_requester_delivered(engine, fake_db):
                          if "UPDATE job_requesters" in e[1] and "delivered = TRUE" in e[1]]
     assert delivered_updates, "redeliver must mark the requester delivered"
     assert delivered_updates[0][2][1:] == (7,)
+
+
+# ---------------------------------------------------------------------------
+# QA E9: a network timeout on a status-card edit must NEVER abort the
+# delivery loop for remaining requesters (regression: edit_status_sync and
+# the failed-card edit only caught TelegramAPIError)
+# ---------------------------------------------------------------------------
+
+class NetworkFlakyBot:
+    """edit_message_text times out; sends succeed."""
+
+    def __init__(self):
+        self.delivered = []
+
+    async def send_video(self, **kw):
+        self.delivered.append(kw.get("chat_id"))
+        return SimpleNamespace(message_id=700)
+
+    async def edit_message_text(self, **kw):
+        raise asyncio.TimeoutError()
+
+    async def copy_message(self, **kw):
+        return SimpleNamespace(message_id=701)
+
+
+async def test_edit_status_sync_swallows_network_timeout(engine):
+    engine.bot = NetworkFlakyBot()
+    # must not raise (previously TimeoutError propagated)
+    await engine.edit_status_sync(100, 200, "any text")
+
+
+async def test_network_timeout_on_card_edit_does_not_abort_other_requesters(engine, fake_db):
+    engine.bot = NetworkFlakyBot()
+    jid = "dddddddd-0000-0000-0000-000000000012"
+    media_id = "eeeeeeee-0000-0000-0000-000000000012"
+
+    job_row = {
+            "id": jid, "status": "completed", "stage": "completed",
+            "profile": "edu480", "effective_profile": "edu480",
+            "requester_tg_id": 1, "media_id": media_id,
+            "source_size": 5000, "output_size": 4000, "source_path": None,
+            "started_at": None, "completed_at": None,
+            "is_no_gain": False, "archived": True, "progress": 100,
+            "source_duration": 60.0, "reuse_of": None,
+            "output_name": "v", "source_filename": "v.mp4",
+            "personal_thumb_path": None, "personal_caption": None,
+            "caption_mode": "replace", "watermark_json": None,
+            "chat_id": 1, "status_message_id": 42,
+        }
+
+    fake_db.on_fetchval(lambda sql: "FROM archive_records ar" in sql, None)
+    fake_db.on_fetchrow(lambda sql: "SELECT * FROM archive_records" in sql,
+                        {"id": "aaaaaaaa-0000-0000-0000-000000000000",
+                         "channel_id": -100123, "message_id": 77,
+                         "status": "active", "output_tg_file_id": "ofid",
+                         "source_media_id": media_id, "output_media_id": "ooo1",
+                         "profile": "edu480", "profile_version": 2})
+    fake_db.on_fetchrow(lambda sql: "SELECT tg_file_id FROM media_assets" in sql,
+                        {"tg_file_id": "out-file-id"})
+    fake_db.on_fetchrow(lambda sql: "SELECT tg_file_id, width, height" in sql,
+                        {"tg_file_id": "src-file-id", "width": 640, "height": 480,
+                         "duration_s": 60.0, "vcodec": "h264", "acodec": "aac",
+                         "probe": None})
+    fake_db.on_fetchrow(lambda sql: "SELECT language, delivery_style" in sql,
+                        {"language": "fa", "delivery_style": "video",
+                         "notify_done": True, "show_meta": True,
+                         "thumbnail_file_id": None})
+    fake_db.on_fetchval(lambda sql: "SELECT language FROM users" in sql, "fa")
+    fake_db.on_fetchrow(lambda sql: "SELECT probe, width" in sql,
+                        {"probe": None, "width": 640, "height": 480,
+                         "duration_s": 60.0, "vcodec": "h264", "acodec": "aac"})
+    fake_db.on_fetch(lambda sql: "FROM job_requesters" in sql,
+                     [{"tg_id": 1, "chat_id": 1, "status_message_id": 11,
+                       "delivered": False},
+                      {"tg_id": 2, "chat_id": 2, "status_message_id": 22,
+                       "delivered": False}])
+
+    await engine._deliver_to_requesters(
+        job_row, "aaaaaaaa-0000-0000-0000-000000000000", media_id,
+        "out-file-id", out_size=4000,
+        out_probe={"width": 640, "height": 480, "duration_s": 60.0,
+                   "vcodec": "h264", "acodec": "aac"},
+    )
+
+    # copy_message goes to the archive; both requesters get their own copy:
+    delivered = sorted(e[2][1] for e in fake_db.executed
+                       if "delivered = TRUE" in e[1])
+    assert delivered == [1, 2], \
+        "timeout on requester 1's card edit must not abort requester 2"
+    inserts = [e for e in fake_db.executed if "INSERT INTO deliveries" in e[1]]
+    assert len(inserts) == 2
+    assert all(e[2][6] in ("ok", "failed") for e in inserts), \
+        "card-edit timeout (metadata op) is NOT a delivery-unknown: sends succeeded"

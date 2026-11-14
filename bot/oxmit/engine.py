@@ -10,6 +10,7 @@ import os
 import shutil
 import time
 import uuid
+import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -459,6 +460,10 @@ class JobEngine(QueueMixin):
 
     async def edit_status_sync(self, chat_id: int, message_id: int | None, text: str,
                                markup: InlineKeyboardMarkup | None = None) -> None:
+        """Edit a status card. Never raises: a network timeout/reset on a
+        card edit must not abort the caller's delivery loop for the
+        remaining requesters (QA 2026-11-14, E9). The edit may actually have
+        been applied remotely — treat as best-effort either way."""
         if not chat_id or not message_id:
             return
         try:
@@ -473,9 +478,11 @@ class JobEngine(QueueMixin):
                     chat_id=chat_id, message_id=message_id, text=text,
                     reply_markup=markup,
                 )
-            except TelegramAPIError:
+            except (TelegramAPIError, TimeoutError, ConnectionResetError,
+                    aiohttp.ClientError):
                 pass
-        except TelegramAPIError:
+        except (TelegramAPIError, TimeoutError, ConnectionResetError,
+                aiohttp.ClientError):
             pass
 
     _STAGES = [("recv", "🧾"), ("queued", "🧾"), ("copy", "📋"), ("encode", "⚙️"),
@@ -1135,7 +1142,8 @@ class JobEngine(QueueMixin):
                         text=tr("status_delivery_failed", lang),
                         reply_markup=redeliver_markup(job_id),
                     )
-                except TelegramAPIError:
+                except (TelegramAPIError, TimeoutError, ConnectionResetError,
+                        aiohttp.ClientError):
                     pass
 
     # ------------------------------------------------------------------
@@ -2719,7 +2727,10 @@ class JobEngine(QueueMixin):
                         reply_markup=redeliver_markup(str(row["id"])),
                     )
                     continue
-                except TelegramAPIError:
+                except (TelegramAPIError, TimeoutError, ConnectionResetError,
+                        aiohttp.ClientError):
+                    # QA E9: a network failure on the failed-card edit must
+                    # not abort delivery for the remaining requesters.
                     pass
             await self.edit_status_sync(r["chat_id"], r["status_message_id"], summary)
 
