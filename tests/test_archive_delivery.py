@@ -214,4 +214,75 @@ async def test_deliver_result_zero_duration_normalized_to_none():
     assert kwargs.get("duration") is None
 
 
+@pytest.mark.asyncio
+async def test_deliver_to_requesters_json_string_probe_no_gain(monkeypatch):
+    import json
+    from unittest.mock import AsyncMock, MagicMock
+    from oxmit.engine import JobEngine
+
+    engine = object.__new__(JobEngine)
+    engine.db = MagicMock()
+    engine.cfg = MagicMock()
+    engine.cfg.max_upload_bytes = 2000 * 1024 * 1024
+    engine.bot = MagicMock()
+    engine._global_thumb = MagicMock(return_value=None)
+    engine._media_filename = AsyncMock(return_value="video.mp4")
+    engine._lang = AsyncMock(return_value="fa")
+    engine._user_pref = AsyncMock(return_value={})
+    engine.edit_status_sync = AsyncMock()
+
+    row = {
+        "id": "11111111-1111-1111-1111-111111111111",
+        "media_id": "22222222-2222-2222-2222-222222222222",
+        "source_size": 700 * 1024 * 1024,
+        "source_path": "/tmp/source.mp4",
+        "started_at": None,
+        "completed_at": None,
+        "profile": "edu480",
+        "reuse_of": None,
+    }
+    reqs = [{"tg_id": 123, "chat_id": 123, "status_message_id": 456}]
+
+    src_asset = {
+        "tg_file_id": "src-fid",
+        "width": 1280,
+        "height": 720,
+        "duration_s": 8657.0,
+        "vcodec": "h264",
+        "acodec": "aac",
+        "probe": json.dumps({"width": 1280, "height": 720, "duration_s": 8657.0}),
+    }
+
+    async def fetch(sql, *args):
+        if "FROM job_requesters" in sql:
+            return reqs
+        return []
+
+    async def fetchrow(sql, *args):
+        if "FROM media_assets" in sql:
+            return src_asset
+        return None
+
+    engine.db.fetch = fetch
+    engine.db.fetchrow = fetchrow
+    engine.db.execute = AsyncMock()
+    engine.db.bump = AsyncMock()
+
+    mock_deliver = AsyncMock(return_value=(True, "file_id", 999))
+    from oxmit import archive as archive_mod
+    monkeypatch.setattr(archive_mod, "deliver_result", mock_deliver)
+
+    # Must not raise ValueError: dictionary update sequence element #0 has length 1; 2 is required
+    await engine._deliver_to_requesters(
+        row, archive_id=None, output_media_id=None, out_file_id=None,
+        no_gain=True, out_size=700 * 1024 * 1024,
+    )
+    mock_deliver.assert_awaited_once()
+    kwargs = mock_deliver.await_args.kwargs
+    assert kwargs.get("duration") == 8657
+    assert kwargs.get("width") == 1280
+    assert kwargs.get("height") == 720
+
+
+
 

@@ -2571,14 +2571,14 @@ class JobEngine(QueueMixin):
                 "SELECT probe, width, height, duration_s, vcodec, acodec FROM media_assets WHERE id = $1",
                 output_media_id)
             if op:
-                merged = dict(op.get("probe") or {})
+                merged = dict(_load_json(op.get("probe")) or {})
                 for k, v in (("width", op["width"]), ("height", op["height"]),
                              ("duration_s", op["duration_s"]),
                              ("vcodec", op["vcodec"]), ("acodec", op["acodec"])):
                     merged.setdefault(k, v)
                 out_probe = {**merged, **{k: v for k, v in out_probe.items() if v}}
         if no_gain and src_asset:
-            effective_probe = dict(src_asset.get("probe") or {})
+            effective_probe = dict(_load_json(src_asset.get("probe")) or {})
             if not effective_probe:
                 effective_probe = {
                     "width": src_asset.get("width"),
