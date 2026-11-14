@@ -28,10 +28,13 @@ ALGORITHM_LABELS_FA: dict[str, str] = {
 }
 
 
-def build_queue_order_cte(mode: str) -> str:
+def build_queue_order_cte(mode: str, admin_bypass: bool = False, penalty: int = 300) -> str:
     """Generate the SQL CTE for ordering queued jobs according to the active algorithm."""
+    admin_sql = "TRUE" if admin_bypass else "FALSE"
+    penalty_int = int(penalty)
+
     if mode == "weighted_fair":
-        return """
+        return f"""
         WITH OrderedQueue AS (
             SELECT
                 j.id,
@@ -40,7 +43,7 @@ def build_queue_order_cte(mode: str) -> str:
                 j.source_size,
                 COALESCE(j.priority_boost, 0) AS priority_boost,
                 CASE
-                    WHEN $1 = TRUE AND j.is_admin_job = TRUE THEN 1
+                    WHEN {admin_sql} = TRUE AND j.is_admin_job = TRUE THEN 1
                     ELSE 0
                 END AS effective_priority,
                 ROW_NUMBER() OVER (
@@ -56,13 +59,13 @@ def build_queue_order_cte(mode: str) -> str:
                 ORDER BY
                     oq.priority_boost DESC,
                     oq.effective_priority DESC,
-                    (oq.enqueued_at + ((oq.user_rank_index - 1) * ($2 * INTERVAL '1 second'))) ASC,
+                    (oq.enqueued_at + ((oq.user_rank_index - 1) * ({penalty_int} * INTERVAL '1 second'))) ASC,
                     oq.id ASC
             ) AS global_queue_position
         FROM OrderedQueue oq
         """
     elif mode == "strict_fifo":
-        return """
+        return f"""
         WITH OrderedQueue AS (
             SELECT
                 j.id,
@@ -70,7 +73,7 @@ def build_queue_order_cte(mode: str) -> str:
                 j.enqueued_at,
                 COALESCE(j.priority_boost, 0) AS priority_boost,
                 CASE
-                    WHEN $1 = TRUE AND j.is_admin_job = TRUE THEN 1
+                    WHEN {admin_sql} = TRUE AND j.is_admin_job = TRUE THEN 1
                     ELSE 0
                 END AS effective_priority
             FROM jobs j
@@ -88,7 +91,7 @@ def build_queue_order_cte(mode: str) -> str:
         FROM OrderedQueue oq
         """
     elif mode == "size_aware_fair":
-        return """
+        return f"""
         WITH OrderedQueue AS (
             SELECT
                 j.id,
@@ -97,7 +100,7 @@ def build_queue_order_cte(mode: str) -> str:
                 j.source_size,
                 COALESCE(j.priority_boost, 0) AS priority_boost,
                 CASE
-                    WHEN $1 = TRUE AND j.is_admin_job = TRUE THEN 1
+                    WHEN {admin_sql} = TRUE AND j.is_admin_job = TRUE THEN 1
                     ELSE 0
                 END AS effective_priority,
                 ROW_NUMBER() OVER (
@@ -121,7 +124,7 @@ def build_queue_order_cte(mode: str) -> str:
         FROM OrderedQueue oq
         """
     else:  # fair_round_robin (default)
-        return """
+        return f"""
         WITH OrderedQueue AS (
             SELECT
                 j.id,
@@ -130,7 +133,7 @@ def build_queue_order_cte(mode: str) -> str:
                 j.source_size,
                 COALESCE(j.priority_boost, 0) AS priority_boost,
                 CASE
-                    WHEN $1 = TRUE AND j.is_admin_job = TRUE THEN 1
+                    WHEN {admin_sql} = TRUE AND j.is_admin_job = TRUE THEN 1
                     ELSE 0
                 END AS effective_priority,
                 ROW_NUMBER() OVER (
@@ -169,7 +172,7 @@ class QueueScheduler:
         admin_bypass = self.cfg.get_bool("admin_queue_bypass", False)
         active_workers = max(1, self.cfg.get_int("active_encoding_workers", 2))
 
-        cte = build_queue_order_cte(mode)
+        cte = build_queue_order_cte(mode, admin_bypass=admin_bypass, penalty=penalty)
         sql = f"""
         WITH Q AS ({cte}),
         Total AS (SELECT COUNT(*) AS total_count FROM jobs WHERE status = 'queued')
@@ -178,10 +181,10 @@ class QueueScheduler:
             t.total_count
         FROM Q q
         CROSS JOIN Total t
-        WHERE q.id = $3
+        WHERE q.id = $1::uuid
         """
 
-        row = await self.db.fetchrow(sql, admin_bypass, penalty, jid)
+        row = await self.db.fetchrow(sql, jid)
         if not row:
             # Job might not be in 'queued' status anymore
             return None
@@ -221,7 +224,7 @@ class QueueScheduler:
         penalty = self.cfg.get_int("wfq_time_penalty_seconds", 300)
         admin_bypass = self.cfg.get_bool("admin_queue_bypass", False)
 
-        cte = build_queue_order_cte(mode)
+        cte = build_queue_order_cte(mode, admin_bypass=admin_bypass, penalty=penalty)
         claim_sql = f"""
         WITH NextInQueue AS (
             {cte}
@@ -232,7 +235,7 @@ class QueueScheduler:
         SET
             status = 'processing',
             stage = 'downloading',
-            worker_id = $3,
+            worker_id = $1,
             started_at = COALESCE(started_at, now()),
             updated_at = now()
         WHERE id = (
@@ -246,7 +249,7 @@ class QueueScheduler:
         RETURNING id, requester_tg_id, chat_id, media_id, profile, source_size, source_path, source_message_id, status_message_id
         """
 
-        row = await self.db.fetchrow(claim_sql, admin_bypass, penalty, worker_id)
+        row = await self.db.fetchrow(claim_sql, worker_id)
         if row:
             log.info("claimed job %s for worker %s via %s scheduler", row["id"], worker_id, mode)
             return dict(row)
@@ -259,7 +262,7 @@ class QueueScheduler:
         penalty = self.cfg.get_int("wfq_time_penalty_seconds", 300)
         admin_bypass = self.cfg.get_bool("admin_queue_bypass", False)
 
-        cte = build_queue_order_cte(mode)
+        cte = build_queue_order_cte(mode, admin_bypass=admin_bypass, penalty=penalty)
         sql = f"""
         WITH Q AS ({cte})
         SELECT
@@ -282,10 +285,10 @@ class QueueScheduler:
         LEFT JOIN users u ON u.tg_id = j.requester_tg_id
         LEFT JOIN media_assets m ON m.id = j.media_id
         ORDER BY q.global_queue_position ASC
-        LIMIT $3
+        LIMIT $1::integer
         """
 
-        rows = await self.db.fetch(sql, admin_bypass, penalty, limit)
+        rows = await self.db.fetch(sql, limit)
         items = []
         for r in rows:
             items.append({
