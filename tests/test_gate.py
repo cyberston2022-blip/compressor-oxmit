@@ -52,6 +52,11 @@ class StubBot:
     async def get_chat(self, cid):
         if isinstance(cid, str) and "t.me/+" in cid:
             raise RuntimeError("Chat not found")
+        if isinstance(cid, str) and cid.startswith("@"):
+            for chat in self.chats.values():
+                if (chat.username or "").lower() == cid[1:].lower():
+                    return chat
+            raise RuntimeError("Chat not found")
         chat = self.chats.get(int(cid))
         if chat is None:
             raise RuntimeError("Chat not found")
