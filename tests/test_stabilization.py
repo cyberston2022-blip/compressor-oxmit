@@ -24,6 +24,7 @@ from oxmit.panel.security import is_owner_session, require_owner  # noqa: F401
 # bot-api creates dirs 0750 / files 0600; the worker reads them as uid 1000)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX chmod/stat.S_IMODE unsupported on Windows NTFS")
 async def test_make_botapi_readable_chmods_dirs_and_file(engine, tmp_path):
     botapi = tmp_path / "botapi"
     tokdir = botapi / "token-dir"
@@ -47,6 +48,7 @@ async def test_make_botapi_readable_chmods_dirs_and_file(engine, tmp_path):
     assert stat.S_IMODE(f.stat().st_mode) == 0o644
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX chmod/stat.S_IMODE unsupported on Windows NTFS")
 async def test_make_botapi_readable_never_touches_outside_botapi(engine, tmp_path):
     outside = tmp_path / "outside.mp4"
     outside.write_bytes(b"x")
@@ -58,6 +60,7 @@ async def test_make_botapi_readable_never_touches_outside_botapi(engine, tmp_pat
     assert stat.S_IMODE(outside.stat().st_mode) == 0o600
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX chmod/stat.S_IMODE unsupported on Windows NTFS")
 async def test_stage_source_symlink_grants_worker_read(engine, tmp_path):
     botapi = tmp_path / "botapi"
     tokdir = botapi / "token-dir"

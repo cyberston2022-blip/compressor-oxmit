@@ -34,27 +34,42 @@ _MOCK_CONTAINERS = [
 
 def get_system_metrics(cfg: Any = None, state: Any = None) -> dict[str, Any]:
     """Retrieve host system resource metrics (CPU, RAM, Disk, Uptime, Load)."""
-    # CPU percent (non-blocking sampler)
+    # CPU percent and core count
     cpu_pct = 0.0
+    cores = 1
     if psutil:
         try:
+            cores = psutil.cpu_count(logical=True) or psutil.cpu_count(logical=False) or 1
             cpu_pct = float(psutil.cpu_percent(interval=None))
         except Exception:
             cpu_pct = 0.0
+            cores = 1
 
     # RAM metrics
     if psutil:
         try:
             vm = psutil.virtual_memory()
-            ram = {
+            ram_total_mb = round(vm.total / (1024 * 1024), 1)
+            ram_used_mb = round(vm.used / (1024 * 1024), 1)
+            ram_pct = round(float(vm.percent), 1)
+            memory_dict = {
+                "percent": ram_pct,
+                "total_mb": ram_total_mb,
+                "used_mb": ram_used_mb,
+                "total_gb": round(vm.total / (1024 * 1024 * 1024), 2),
+                "used_gb": round(vm.used / (1024 * 1024 * 1024), 2),
+            }
+            ram_legacy = {
                 "total": int(vm.total),
                 "used": int(vm.used),
-                "percent": round(float(vm.percent), 1),
+                "percent": ram_pct,
             }
         except Exception:
-            ram = {"total": 0, "used": 0, "percent": 0.0}
+            memory_dict = {"percent": 0.0, "total_mb": 0, "used_mb": 0, "total_gb": 0, "used_gb": 0}
+            ram_legacy = {"total": 0, "used": 0, "percent": 0.0}
     else:
-        ram = {"total": 0, "used": 0, "percent": 0.0}
+        memory_dict = {"percent": 0.0, "total_mb": 0, "used_mb": 0, "total_gb": 0, "used_gb": 0}
+        ram_legacy = {"total": 0, "used": 0, "percent": 0.0}
 
     # Disk metrics
     media_root = getattr(cfg, "media_root", "/") if cfg else "/"
@@ -63,13 +78,20 @@ def get_system_metrics(cfg: Any = None, state: Any = None) -> dict[str, Any]:
     try:
         du = shutil.disk_usage(media_root)
         disk_pct = round(100.0 * du.used / du.total, 1) if du.total > 0 else 0.0
-        disk = {
+        free_gb = round(du.free / (1024 * 1024 * 1024), 1)
+        total_gb = round(du.total / (1024 * 1024 * 1024), 1)
+        used_gb = round(du.used / (1024 * 1024 * 1024), 1)
+        disk_dict = {
+            "free_gb": free_gb,
+            "total_gb": total_gb,
+            "used_gb": used_gb,
+            "used_percent": disk_pct,
+            "percent": disk_pct,
             "total": int(du.total),
             "used": int(du.used),
-            "percent": disk_pct,
         }
     except Exception:
-        disk = {"total": 0, "used": 0, "percent": 0.0}
+        disk_dict = {"free_gb": 0, "total_gb": 0, "used_gb": 0, "used_percent": 0.0, "percent": 0.0, "total": 0, "used": 0}
 
     # Host uptime (seconds)
     uptime_s = 0.0
@@ -81,6 +103,17 @@ def get_system_metrics(cfg: Any = None, state: Any = None) -> dict[str, Any]:
     if uptime_s <= 0.0 and state and hasattr(state, "started_at"):
         uptime_s = round(float(time.time() - state.started_at), 1)
 
+    uptime_days = int(uptime_s // 86400)
+    uptime_hours = int((uptime_s % 86400) // 3600)
+    uptime_mins = int((uptime_s % 3600) // 60)
+    uptime_dict = {
+        "days": uptime_days,
+        "hours": uptime_hours,
+        "minutes": uptime_mins,
+        "seconds": int(uptime_s),
+        "formatted_fa": f"{uptime_days} روز و {uptime_hours} ساعت" if uptime_days else f"{uptime_hours} ساعت و {uptime_mins} دقیقه",
+    }
+
     # Load average (1m, 5m, 15m)
     load_avg = [0.0, 0.0, 0.0]
     if hasattr(os, "getloadavg"):
@@ -90,16 +123,22 @@ def get_system_metrics(cfg: Any = None, state: Any = None) -> dict[str, Any]:
             pass
     if load_avg == [0.0, 0.0, 0.0] and psutil:
         try:
-            cores = psutil.cpu_count() or 1
             est_load = round((cpu_pct / 100.0) * cores, 2)
             load_avg = [est_load, 0.0, 0.0]
         except Exception:
             pass
 
     return {
-        "cpu": round(cpu_pct, 1),
-        "ram": ram,
-        "disk": disk,
+        "cpu": {
+            "percent": round(cpu_pct, 1),
+            "count": cores,
+            "cores": cores,
+        },
+        "cpu_percent": round(cpu_pct, 1),
+        "memory": memory_dict,
+        "ram": ram_legacy,
+        "disk": disk_dict,
+        "uptime": uptime_dict,
         "uptime_s": uptime_s,
         "load_avg": load_avg,
     }

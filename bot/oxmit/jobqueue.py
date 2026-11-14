@@ -42,6 +42,16 @@ from . import edu480
 from . import media as media_mod
 from .encore_client import EncoreError
 from .log import get_logger
+from .telemetry_cards import (
+    fmt_duration_fa,
+    make_cancel_kb,
+    render_progress_bar,
+    render_stage_0_queued,
+    render_stage_1_download,
+    render_stage_2_encode,
+    render_stage_3_upload,
+    render_stage_complete,
+)
 from .texts import tr
 
 log = get_logger("oxmit.jobqueue")
@@ -227,26 +237,40 @@ class QueueMixin:
                     """,
                     int(size_bytes or 0), clean_src, duration_s, width, height,
                     file_id, file_unique_id, clean_src.lower(), (mime or "")[:64] or None)
-                priority = 70 if is_admin else (await self.effective_limits(tg_id))["priority"]
+                dyn = getattr(self, "dynamic_config", None)
+                admin_bypass = dyn.get_bool("admin_queue_bypass", False) if dyn else False
+                priority = 70 if (is_admin and admin_bypass) else (await self.effective_limits(tg_id))["priority"]
                 job_id = await conn.fetchval(
                     """
                     INSERT INTO jobs(requester_tg_id, media_id, profile, profile_version,
                         effective_profile, status, stage, priority, source_size,
                         source_path, source_message_id, status_message_id, chat_id,
-                        output_name, source_filename, progress_changed_at, reserved_bytes)
+                        output_name, source_filename, progress_changed_at, reserved_bytes,
+                        is_admin_job, priority_boost)
                     VALUES ($1,$2,'edu480',$3,'edu480','queued','queued',$4,$5,$6,$7,$8,
-                            $9,$10,$11, now(), 0)
+                            $9,$10,$11, now(), 0, $12, 0)
                     RETURNING id
                     """,
                     tg_id, media_id, edu480.PROFILE_VERSION, priority, int(size_bytes or 0),
                     local_path, source_msg_id, status_msg_id, chat_id, out_stem,
-                    (filename or "")[:255] or None)
+                    (filename or "")[:255] or None, is_admin)
                 await conn.execute(
                     """
                     INSERT INTO job_requesters
                         (job_id, tg_id, chat_id, source_message_id, status_message_id)
                     VALUES ($1,$2,$3,$4,$5) ON CONFLICT (job_id, tg_id) DO NOTHING
                     """, job_id, tg_id, chat_id, source_msg_id, status_msg_id)
+        sched = getattr(self, "queue_scheduler", None)
+        if sched:
+            try:
+                q_det = await sched.get_job_queue_details(str(job_id))
+                if q_det:
+                    await self.db.execute(
+                        "UPDATE jobs SET initial_queue_pos = $2 WHERE id = $1",
+                        job_id, q_det["global_queue_position"]
+                    )
+            except Exception as exc:
+                log.warning("failed to set initial_queue_pos: %s", exc)
         await self.db.bump("requests_total")
         await self.db.bump("bytes_in", int(size_bytes or 0))
         await self.db.execute(
@@ -315,7 +339,28 @@ class QueueMixin:
         return total, len(rows)
 
     async def queue_info(self, job_id: str) -> dict:
-        """Position, jobs ahead, busy workers and an ETA range for one job."""
+        """Position, jobs ahead, busy workers and an ETA for one job."""
+        sched = getattr(self, "queue_scheduler", None)
+        if sched:
+            try:
+                details = await sched.get_job_queue_details(str(job_id))
+                if details:
+                    init_pos = await self.db.fetchval(
+                        "SELECT initial_queue_pos FROM jobs WHERE id = $1", uuid.UUID(str(job_id))
+                    )
+                    return {
+                        "position": details["global_queue_position"],
+                        "ahead": details["jobs_ahead"],
+                        "busy": await self.busy_slots(),
+                        "slots": details["active_workers"],
+                        "total_queued": details["total_queued"],
+                        "initial_position": init_pos or details["global_queue_position"],
+                        "eta_seconds": details["estimated_wait_seconds"],
+                        "algorithm_fa": details["algorithm_fa"],
+                    }
+            except Exception as exc:
+                log.warning("queue_scheduler details error: %s", exc)
+
         row = await self.db.fetchrow(
             "SELECT status, priority, enqueued_at FROM jobs WHERE id = $1",
             uuid.UUID(job_id))
@@ -339,13 +384,38 @@ class QueueMixin:
     # ------------------------------------------------------------------
     # user-facing cards
     # ------------------------------------------------------------------
-    def _job_kb(self, job_id: str, lang: str) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text=tr("btn_cancel_job", lang), callback_data=f"canc:{job_id}")
-        ]])
+    def _job_kb(self, job_id: str, lang: str = "fa") -> InlineKeyboardMarkup:
+        return make_cancel_kb(job_id)
 
     def queue_card_text(self, lang: str, *, name: str, size: int, dur, job_id: str,
-                        info: dict) -> str:
+                        info: dict, user_name: str = "", user_id: int | str = 0) -> str:
+        if lang == "fa":
+            dyn = getattr(self, "dynamic_config", None)
+            bar_len = dyn.get_int("progress_bar_length", 12) if dyn else 12
+            max_q = dyn.get_int("max_global_queue_size", 500) if dyn else 500
+            pos = info.get("position", 1)
+            ahead = info.get("ahead", max(0, pos - 1))
+            total_q = info.get("total_queued", pos)
+            init_pos = info.get("initial_position", pos)
+            algo_fa = info.get("algorithm_fa", "عادلانه چرخشی (Fair-Share)")
+            eta_s = info.get("eta_seconds", 0)
+            return render_stage_0_queued(
+                active_jobs=info.get("busy", 0),
+                max_queue=max_q,
+                total_queued=total_q,
+                position=pos,
+                initial_position=init_pos,
+                jobs_ahead=ahead,
+                algorithm_fa=algo_fa,
+                elapsed_seconds=info.get("elapsed", 0.0),
+                eta_seconds=eta_s,
+                size_bytes=size,
+                profile="edu480",
+                user_name=user_name or name or "کاربر",
+                user_id=user_id or 0,
+                job_id=job_id,
+                bar_length=bar_len,
+            )
         eta = edu480.fmt_eta_range_fa(info.get("eta_low", 0), info.get("eta_high", 0)) \
             if lang != "en" else f"{info.get('eta_low', 0) // 60}-{info.get('eta_high', 0) // 60} min"
         return tr("queue_card", lang, name=name, size=media_mod.human_size(size),
@@ -359,13 +429,115 @@ class QueueMixin:
             """
             SELECT j.*, m.duration_s AS m_duration, m.width AS m_w, m.height AS m_h,
                    m.fps AS m_fps, m.vcodec AS m_vcodec, m.acodec AS m_acodec,
-                   m.bitrate AS m_bitrate
-            FROM jobs j JOIN media_assets m ON m.id = j.media_id WHERE j.id = $1
+                   m.bitrate AS m_bitrate,
+                   u.first_name, u.username
+            FROM jobs j
+            JOIN media_assets m ON m.id = j.media_id
+            LEFT JOIN users u ON u.tg_id = j.requester_tg_id
+            WHERE j.id = $1
             """, uuid.UUID(str(job_id)))
 
     def stage_card_text(self, row, lang: str, info: dict | None = None) -> str:
         info = info or {}
-        stage = row["stage"] or row["status"]
+        def _r(k, default=None):
+            if hasattr(row, "get"):
+                return row.get(k, default)
+            try:
+                return row[k]
+            except Exception:
+                return default
+
+        stage = _r("stage") or _r("status") or "reserved"
+        dyn = getattr(self, "dynamic_config", None)
+        bar_len = dyn.get_int("progress_bar_length", 12) if dyn else 12
+
+        def _since(col):
+            v = _r(col)
+            if v is None:
+                return 0.0
+            if getattr(v, "tzinfo", None) is None:
+                v = v.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - v).total_seconds())
+
+        if lang == "fa":
+            jid = str(_r("id") or "")
+            user_id = _r("requester_tg_id") or _r("tg_id") or _r("user_id") or 0
+            user_name = _r("first_name") or _r("username") or str(user_id)
+            source_size = int(_r("source_size") or 0)
+            max_conc = dyn.get_int("active_encoding_workers", self.cfg.slots) if dyn else self.cfg.slots
+
+            if stage in ("reserved", "downloading", "copying"):
+                dl_workers = dyn.get_int("active_download_workers", 4) if dyn else 4
+                processed = int(info.get("processed_bytes") or (_r("processed_bytes") or 0))
+                total = max(1, int(_r("total_bytes") or source_size))
+                speed = float(info.get("speed_bps") or (_r("current_speed_bps") or 0.0))
+                elapsed = _since("download_started_at") or _since("reserved_at")
+                eta = max(0.0, (total - processed) / speed) if speed > 0 else 0.0
+                return render_stage_1_download(
+                    active_jobs=1,
+                    max_concurrent=dl_workers,
+                    processed_bytes=processed,
+                    total_bytes=total,
+                    speed_bps=speed,
+                    elapsed_seconds=elapsed,
+                    eta_seconds=eta,
+                    engine_name=str(_r("engine_info") or "TDLib v1.8.68"),
+                    user_name=user_name,
+                    user_id=user_id,
+                    job_id=jid,
+                    bar_length=bar_len,
+                )
+            elif stage in ("probing", "checking", "encoding"):
+                pct = float(info.get("progress") or (_r("progress") or 0.0))
+                processed = int((pct / 100.0) * source_size)
+                speed_bps = float(info.get("speed_bps") or (_r("current_speed_bps") or 0.0))
+                fps = float(info.get("fps") or 0.0)
+                speed_x = float(info.get("speed") or 0.0)
+                elapsed = _since("encode_started_at")
+                dur = float(_r("m_duration") or 0.0)
+                eta = (dur * (100.0 - pct) / 100.0) / speed_x if (speed_x > 0 and pct > 0 and dur > 0) else 0.0
+                return render_stage_2_encode(
+                    active_jobs=1,
+                    max_concurrent=max_conc,
+                    pct=pct,
+                    processed_bytes=processed,
+                    total_bytes=source_size,
+                    speed_bps=speed_bps,
+                    fps=fps,
+                    speed_x=speed_x,
+                    elapsed_seconds=elapsed,
+                    eta_seconds=eta,
+                    profile=str(_r("profile") or "edu480"),
+                    engine_name="FFmpeg v8.0.1",
+                    user_name=user_name,
+                    user_id=user_id,
+                    job_id=jid,
+                    bar_length=bar_len,
+                )
+            else:  # uploading, completing, validating, archiving, upload_retry
+                up_workers = dyn.get_int("active_upload_workers", 4) if dyn else 4
+                out_size = int(_r("output_size") or source_size)
+                pct = float(info.get("upload_progress") or (100.0 if stage == "completing" else (_r("progress") or 50.0)))
+                uploaded = int((pct / 100.0) * out_size)
+                speed_bps = float(info.get("speed_bps") or 0.0)
+                elapsed = _since("upload_started_at") or _since("encode_done_at")
+                eta = max(0.0, (out_size - uploaded) / speed_bps) if speed_bps > 0 else 0.0
+                return render_stage_3_upload(
+                    active_jobs=1,
+                    max_concurrent=up_workers,
+                    pct=pct,
+                    uploaded_bytes=uploaded,
+                    total_bytes=out_size,
+                    speed_bps=speed_bps,
+                    elapsed_seconds=elapsed,
+                    eta_seconds=eta,
+                    engine_name=str(_r("engine_info") or "TDLib v1.8.68"),
+                    user_name=user_name,
+                    user_id=user_id,
+                    job_id=jid,
+                    bar_length=bar_len,
+                )
+
         icon, key = {
             "reserved": ("🟠", "st_reserved"), "downloading": ("📥", "st_downloading"),
             "probing": ("🔍", "st_probing"), "checking": ("🧮", "st_checking"),
@@ -377,14 +549,6 @@ class QueueMixin:
         dims = edu480.target_dims(row["m_w"], row["m_h"])
         target = (f"{dims[0]}×{dims[1]}" if dims
                   else (f"{row['m_w']}×{row['m_h']}" if row["m_w"] else "480p"))
-
-        def _since(col):
-            v = row[col] if col in row.keys() else None
-            if v is None:
-                return 0
-            if v.tzinfo is None:
-                v = v.replace(tzinfo=timezone.utc)
-            return (datetime.now(timezone.utc) - v).total_seconds()
 
         if stage in ("reserved", "downloading", "copying"):
             body = tr("card_dl_body", lang, elapsed=_clock(_since("download_started_at")
@@ -439,52 +603,68 @@ class QueueMixin:
                               markup=self._job_kb(str(row["id"]), lang), force=force)
 
     async def refresh_queue_cards(self, budget: int = 15) -> None:
-        """Re-render queued cards (position / ETA) - bounded and throttled.
-
-        With thousands of queued jobs, editing every card each poll would hit
-        Telegram flood limits; each card is refreshed at most once a minute
-        and at most ``budget`` cards per cycle, nearest-to-start first.
-        """
+        """Re-render queued cards (position / ETA) - throttled to 10s on position changes."""
+        sched = getattr(self, "queue_scheduler", None)
+        dyn = getattr(self, "dynamic_config", None)
         rows = await self.db.fetch(
             """
             SELECT j.id, j.status_message_id, j.chat_id, j.requester_tg_id,
-                   j.output_name, j.source_filename, j.source_size, m.duration_s,
-                   row_number() OVER (ORDER BY j.priority DESC, j.enqueued_at) AS pos
-            FROM jobs j JOIN media_assets m ON m.id = j.media_id
+                   j.output_name, j.source_filename, j.source_size, j.enqueued_at,
+                   j.initial_queue_pos, m.duration_s, u.first_name, u.username
+            FROM jobs j
+            JOIN media_assets m ON m.id = j.media_id
+            LEFT JOIN users u ON u.tg_id = j.requester_tg_id
             WHERE j.status = 'queued'
-            ORDER BY j.priority DESC, j.enqueued_at
+            ORDER BY j.enqueued_at ASC
             LIMIT 500
-            """)
+            """
+        )
         if not rows:
             return
-        rate = await self.throughput_rate()
-        active_rem, busy = await self._active_remaining_s(rate)
-        durations: list = []
         now = time.time()
         edits = 0
+        if not hasattr(self, "_last_pos"):
+            self._last_pos = {}
         for r in rows:
             jid = str(r["id"])
-            ahead = list(durations)
-            durations.append(r["duration_s"])
             if edits >= budget or not r["status_message_id"]:
                 continue
-            if now - self._card_edit_at.get(jid, 0) < 60:
+            last_edit = self._card_edit_at.get(jid, 0.0)
+            if now - last_edit < 10.0:
                 continue
-            low, high = edu480.eta_range(ahead, active_rem if busy >= self.cfg.slots else 0.0,
-                                         self.cfg.slots, rate)
-            info = {"position": r["pos"], "ahead": r["pos"] - 1, "busy": busy,
-                    "slots": self.cfg.slots, "eta_low": low, "eta_high": high}
-            lang = await self._lang(r["requester_tg_id"])
-            text = self.queue_card_text(
-                lang, name=edu480.output_filename(r["output_name"], r["source_filename"]),
-                size=r["source_size"] or 0, dur=r["duration_s"], job_id=jid, info=info)
+
+            q_info = await self.queue_info(jid)
+            pos = q_info.get("position", 1)
+            last_pos = self._last_pos.get(jid)
+            # Only update if position has changed or 60s elapsed
+            if last_pos is not None and last_pos == pos and (now - last_edit < 60.0):
+                continue
+
+            self._last_pos[jid] = pos
             self._card_edit_at[jid] = now
+            elapsed = max(0.0, (datetime.now(timezone.utc) - (r["enqueued_at"].replace(tzinfo=timezone.utc) if r["enqueued_at"].tzinfo is None else r["enqueued_at"])).total_seconds()) if r["enqueued_at"] else 0.0
+            q_info["elapsed"] = elapsed
+
+            lang = await self._lang(r["requester_tg_id"])
+            uname = r["first_name"] or r["username"] or str(r["requester_tg_id"])
+            text = self.queue_card_text(
+                lang,
+                name=edu480.output_filename(r["output_name"], r["source_filename"]),
+                size=r["source_size"] or 0,
+                dur=r["duration_s"],
+                job_id=jid,
+                info=q_info,
+                user_name=uname,
+                user_id=r["requester_tg_id"],
+            )
             chat = r["chat_id"] or r["requester_tg_id"]
             self._edit_status(chat, r["status_message_id"], text,
-                              markup=self._job_kb(jid, lang), force=True)
+                              markup=self._job_kb(jid, lang), force=False)
             edits += 1
+
         if len(self._card_edit_at) > 20000:
             self._card_edit_at.clear()
+            self._last_pos.clear()
 
     # ------------------------------------------------------------------
     # dispatcher
@@ -503,26 +683,19 @@ class QueueMixin:
             return 0
         claimed = 0
         async with self._dispatch_lock:
-            cap = self.cfg.slots + max(0, self.cfg.prefetch_jobs)
+            dyn = getattr(self, "dynamic_config", None)
+            target_workers = dyn.get_int("active_encoding_workers", self.cfg.slots) if dyn else self.cfg.slots
+            cap = target_workers + max(0, self.cfg.prefetch_jobs)
             busy = await self.busy_slots()
+            sched = getattr(self, "queue_scheduler", None)
             while busy < cap:
-                nxt = await self.db.fetchrow(
-                    "SELECT id, source_size FROM jobs WHERE status = 'queued' "
-                    "ORDER BY priority DESC, enqueued_at LIMIT 1")
+                if sched:
+                    nxt = await sched.claim_next_job(self.worker_id)
+                else:
+                    nxt = await self._claim_next(0)
                 if nxt is None:
                     break
-                need = int((nxt["source_size"] or 0) * self.cfg.admission_need_factor) \
-                    + self.cfg.admission_floor_bytes
-                reserved = int(await self.db.fetchval(
-                    "SELECT coalesce(sum(reserved_bytes), 0) FROM jobs "
-                    "WHERE status = 'processing'") or 0)
-                if self._disk_free() - reserved < need:
-                    await self._notify_disk_block(need)
-                    break
-                row = await self._claim_next(need)
-                if row is None:
-                    break
-                job_id = str(row["id"])
+                job_id = str(nxt["id"])
                 task = asyncio.create_task(self._run_pipeline(job_id))
                 self._pipelines[job_id] = task
                 self._bg_tasks.add(task)

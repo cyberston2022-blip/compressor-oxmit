@@ -26,10 +26,18 @@ from . import merge as merge_mod
 from . import quality as quality_mod
 from . import watermark as watermark_mod
 from .config import Settings
+from .dynamic_config import DynamicConfig
 from .encore_client import EncoreClient, EncoreError, EncoreNotFound
 from .jobqueue import POST_ENCODE_STAGES, QueueMixin
 from .log import get_logger
 from .profiles import compute_target_params
+from .queue_scheduler import QueueScheduler
+from .telemetry_cards import (
+    fmt_duration_fa,
+    make_cancel_kb,
+    render_progress_bar,
+    render_stage_complete,
+)
 from .texts import to_fa_digits, tr
 
 log = get_logger("oxmit.engine")
@@ -157,11 +165,14 @@ class Fingerprinter:
 
 
 class JobEngine(QueueMixin):
-    def __init__(self, db, cfg: Settings, bot, encre: EncoreClient) -> None:
+    def __init__(self, db, cfg: Settings, bot, encre: EncoreClient,
+                 dynamic_config: Any = None, queue_scheduler: Any = None) -> None:
         self.db = db
         self.cfg = cfg
         self.bot = bot
         self.encre = encre
+        self.dynamic_config = dynamic_config or DynamicConfig(db)
+        self.queue_scheduler = queue_scheduler or QueueScheduler(db, self.dynamic_config)
         self.state = RuntimeState(archive_channel_id=cfg.archive_channel_id)
         self.fingerprinter = Fingerprinter(db, cfg)
         self._submitting: set[str] = set()
@@ -667,13 +678,26 @@ class JobEngine(QueueMixin):
         """Effective limits for a user: per-user override > tier > env default."""
         tiers = await self.tiers_config()
         user = await self.db.fetchrow(
-            "SELECT is_vip, max_source_gb, max_duration_min, daily_quota_gb "
+            "SELECT is_vip, max_source_gb, max_duration_min, daily_quota_gb, custom_queue_limit "
             "FROM users WHERE tg_id = $1",
             tg_id,
         )
-        is_vip = bool(user and user["is_vip"])
+        def _u_val(k, default=None):
+            if user is None:
+                return default
+            if hasattr(user, "get"):
+                return user.get(k, default)
+            try:
+                return user[k]
+            except Exception:
+                return default
+
+        is_vip = bool(_u_val("is_vip", False))
         tier = tiers["vip"] if is_vip else tiers["normal"]
         gb = 1024**3
+
+        dyn = getattr(self, "dynamic_config", None)
+        max_file_size_mb = dyn.get_int("max_file_size_mb", 2000) if dyn else 2000
 
         def _num(override, key):
             try:
@@ -682,16 +706,33 @@ class JobEngine(QueueMixin):
                 value = None
             return value if value and value > 0 else tier.get(key)
 
-        max_source_gb = _num(user["max_source_gb"] if user else None, "max_source_gb")
-        max_duration_min = _num(user["max_duration_min"] if user else None, "max_duration_min")
-        daily_quota_gb = _num(user["daily_quota_gb"] if user else None, "daily_quota_gb")
+        max_source_gb = _num(_u_val("max_source_gb"), "max_source_gb")
+        max_duration_min = _num(_u_val("max_duration_min"), "max_duration_min")
+        daily_quota_gb = _num(_u_val("daily_quota_gb"), "daily_quota_gb")
+
+        custom_limit = _u_val("custom_queue_limit")
+        if custom_limit is not None and custom_limit > 0:
+            user_pending = custom_limit
+        else:
+            user_pending = max(1, int(tier.get("max_pending") or 10))
+
+        user_active = (
+            (dyn.get_int("vip_active_job_limit", 3) if is_vip else dyn.get_int("user_active_job_limit", 1))
+            if dyn and dyn.get("user_active_job_limit")
+            else max(1, int(tier.get("max_active") or 1))
+        )
+
+        max_source_bytes = int(max_source_gb or 4) * gb
+        if dyn and dyn.get("max_file_size_mb"):
+            max_source_bytes = min(max_source_bytes, dyn.get_int("max_file_size_mb", 4000) * 1024 * 1024)
+
         return {
             "tier": "vip" if is_vip else "normal",
-            "max_source_bytes": int(max_source_gb or 4) * gb,
+            "max_source_bytes": max_source_bytes,
             "max_duration_s": int(max_duration_min or 0) * 60,
             "daily_quota_bytes": int(daily_quota_gb or 0) * gb,
-            "max_active": max(1, int(tier.get("max_active") or 1)),
-            "max_pending": max(1, int(tier.get("max_pending") or 10)),
+            "max_active": user_active,
+            "max_pending": user_pending,
             "max_per_hour": max(1, int(tier.get("max_per_hour") or 1)),
             "priority": 60 if is_vip else 50,
         }
@@ -711,17 +752,20 @@ class JobEngine(QueueMixin):
         """
         if not allow_no_archive and not self.state.archive_channel_id:
             raise AdmissionError("archive_not_configured")
-        if self.state.paused:
+        dyn = getattr(self, "dynamic_config", None)
+        accepting = dyn.get_bool("accepting_new_jobs", True) if dyn else True
+        if self.state.paused or not accepting:
             raise AdmissionError("paused")
         if getattr(self.state, "access_mode", "private") == "private" and not is_admin:
             raise AdmissionError("private_mode")
         user = await self.db.fetchrow("SELECT is_blocked FROM users WHERE tg_id = $1", tg_id)
         if user and user["is_blocked"]:
             raise AdmissionError("blocked_user")
+        max_q = dyn.get_int("max_global_queue_size", self.cfg.max_queued) if dyn else self.cfg.max_queued
         queued = await self.db.fetchval("SELECT count(*) FROM jobs WHERE status = 'queued'")
-        if int(queued or 0) >= self.cfg.max_queued:
+        if int(queued or 0) >= max_q:
             # Genuinely full: say so clearly - never pretend to accept.
-            raise AdmissionError("queue_full", cap=self.cfg.max_queued)
+            raise AdmissionError("queue_full", cap=max_q)
         if is_admin:
             return
         limits = await self.effective_limits(tg_id)

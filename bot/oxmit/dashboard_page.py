@@ -725,6 +725,7 @@ input[type="range"] {
 <nav class="nav-wrap" id="nav-tabs">
   <button class="nav-tab active" data-tab="overview"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg> داشبورد و آمار</button>
   <button class="nav-tab" data-tab="tasks"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> صف و انکودینگ <span class="badge-count" id="tab-cnt-active">0</span></button>
+  <button class="nav-tab" data-tab="config"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> تنظیمات هسته و صف</button>
   <button class="nav-tab" data-tab="docker"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg> کانتینرهای داکر</button>
   <button class="nav-tab" data-tab="bot_users"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg> مدیریت ربات و کاربران</button>
   <button class="nav-tab" data-tab="audit"><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"/><path d="m9 12 2 2 4-4"/></svg> لاگ‌های امنیتی <bdi dir="ltr">(Audit)</bdi></button>
@@ -834,16 +835,18 @@ input[type="range"] {
           </select>
           <input type="text" id="task-filter-q" placeholder="شناسه کار یا نام فایل..." style="width:200px">
           <button class="btn pri" id="btn-task-refresh">جستجو و فیلتر</button>
+          <button class="btn danger" id="btn-batch-cancel" onclick="batchCancelTasks()" style="display:none">لغو کارهای انتخاب‌شده</button>
         </div>
       </div>
       <div class="table-wrap">
         <table id="table-tasks">
           <thead>
             <tr>
+              <th style="width:36px"><input type="checkbox" id="check-all-tasks" onchange="toggleSelectAllTasks(this)"></th>
               <th>شناسه کار</th>
+              <th>جایگاه / وضعیت</th>
               <th>نام فایل</th>
               <th>کاربر</th>
-              <th>وضعیت / درصد</th>
               <th>کیفیت</th>
               <th>حجم اولیه / خروجی</th>
               <th>زمان ایجاد</th>
@@ -851,9 +854,166 @@ input[type="range"] {
             </tr>
           </thead>
           <tbody>
-            <tr><td colspan="8" class="empty">در حال دریافت داده‌های صف...</td></tr>
+            <tr><td colspan="9" class="empty">در حال دریافت داده‌های صف...</td></tr>
           </tbody>
         </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- View 2.5: Dynamic Config & Queue Fairness Simulator -->
+  <section id="view-config" class="view-panel" hidden>
+    <div class="grid-2">
+      <!-- Config Form -->
+      <div class="card">
+        <div class="card-head">
+          <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--purple)" stroke-width="2" fill="none"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg> تنظیمات هسته و موتور صف (Dynamic Runtime Config)</h2>
+          <button class="btn success" id="btn-save-config" onclick="saveDynamicConfig()"><svg class="ico" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> ذخیره و اعمال آنی (Apply Live)</button>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:18px;padding-top:10px">
+          <!-- Group 1 -->
+          <div style="background:var(--card-sub);padding:14px;border-radius:8px;border:1px solid var(--border)">
+            <h4 style="margin:0 0 12px 0;color:var(--acc);font-size:14px;display:flex;align-items:center;gap:6px">
+              ⚡ ظرفیت و محدودیت‌های همزمانی (Concurrency & Capacity)
+            </h4>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر طول مجاز کل صف (Global Queue Limit)</label>
+                <input type="number" id="cfg-max_queue_size" min="10" max="5000" style="width:100%" placeholder="500">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">ورکرهای موازی انکود (Encoding Workers)</label>
+                <input type="number" id="cfg-active_encoding_workers" min="1" max="16" style="width:100%" placeholder="3">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر دانلودهای همزمان (Max Downloads)</label>
+                <input type="number" id="cfg-max_active_downloads" min="1" max="16" style="width:100%" placeholder="5">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر آپلودهای همزمان (Max Uploads)</label>
+                <input type="number" id="cfg-max_active_uploads" min="1" max="16" style="width:100%" placeholder="4">
+              </div>
+            </div>
+          </div>
+
+          <!-- Group 2 -->
+          <div style="background:var(--card-sub);padding:14px;border-radius:8px;border:1px solid var(--border)">
+            <h4 style="margin:0 0 12px 0;color:var(--amber);font-size:14px;display:flex;align-items:center;gap:6px">
+              ⚖️ الگوریتم زمان‌بندی و عدالت صف (Scheduling & Fairness)
+            </h4>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div style="grid-column:1 / -1">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">الگوریتم فعال پردازش صف</label>
+                <select id="cfg-queue_scheduling_algorithm" style="width:100%">
+                  <option value="fair_round_robin">Fair Round-Robin (عدالت گردشی میان کاربران)</option>
+                  <option value="weighted_fair">Weighted Fair Queuing (وزن‌دار با اولویت VIP)</option>
+                  <option value="strict_fifo">Strict FIFO (صف کلاسیک به ترتیب زمان ثبت)</option>
+                  <option value="size_aware_fair">Size-Aware Fair (ترکیب فایل‌های سبک و سنگین)</option>
+                </select>
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">آستانه گرسنگی صف (ثانیه)</label>
+                <input type="number" id="cfg-fairness_starvation_threshold_sec" min="60" max="86400" style="width:100%" placeholder="1800">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">وزن سوگیری اندازه فایل (0.0 تا 1.0)</label>
+                <input type="number" step="0.1" id="cfg-fairness_size_bias_weight" min="0" max="1" style="width:100%" placeholder="0.5">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">فاصله بروزرسانی کارت صف تلگرام (ثانیه)</label>
+                <input type="number" id="cfg-queue_card_throttle_sec" min="3" max="60" style="width:100%" placeholder="10">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">دور زدن صف توسط مدیران (Admin Bypass)</label>
+                <select id="cfg-admin_queue_bypass" style="width:100%">
+                  <option value="false">غیرفعال (مدیر هم در صف عادلانه قرار می‌گیرد)</option>
+                  <option value="true">فعال (مدیر مستقیماً در صدر صف قرار می‌گیرد)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Group 3 -->
+          <div style="background:var(--card-sub);padding:14px;border-radius:8px;border:1px solid var(--border)">
+            <h4 style="margin:0 0 12px 0;color:var(--blue);font-size:14px;display:flex;align-items:center;gap:6px">
+              👥 سیاست سهمیه کاربران (User Quotas & Concurrency)
+            </h4>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر کار همزمان کاربر عادی</label>
+                <input type="number" id="cfg-user_active_job_limit" min="1" max="10" style="width:100%" placeholder="1">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر کار همزمان کاربر VIP</label>
+                <input type="number" id="cfg-vip_active_job_limit" min="1" max="20" style="width:100%" placeholder="3">
+              </div>
+              <div style="grid-column:1 / -1">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">زمان کول‌داون بین دو درخواست کاربر (ثانیه)</label>
+                <input type="number" id="cfg-user_cooldown_seconds" min="0" max="300" style="width:100%" placeholder="0">
+              </div>
+            </div>
+          </div>
+
+          <!-- Group 4 -->
+          <div style="background:var(--card-sub);padding:14px;border-radius:8px;border:1px solid var(--border)">
+            <h4 style="margin:0 0 12px 0;color:var(--green);font-size:14px;display:flex;align-items:center;gap:6px">
+              🛡️ نگهداری دیسک و پایداری (Disk & Safety)
+            </h4>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">آستانه پاکسازی خودکار دیسک (GB)</label>
+                <input type="number" step="0.5" id="cfg-temp_cleanup_threshold_gb" min="1" max="500" style="width:100%" placeholder="20.0">
+              </div>
+              <div>
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">آستانه دیسک اضطراری توقف intake (GB)</label>
+                <input type="number" step="0.5" id="cfg-emergency_disk_threshold_gb" min="1" max="100" style="width:100%" placeholder="5.0">
+              </div>
+              <div style="grid-column:1 / -1">
+                <label style="font-size:12px;color:var(--ink-dim);display:block;margin-bottom:4px">حداکثر دفعات تلاش مجدد تسک‌های خطا (Retries)</label>
+                <input type="number" id="cfg-max_job_retries" min="0" max="5" style="width:100%" placeholder="2">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Fairness Simulator Preview -->
+      <div class="card">
+        <div class="card-head">
+          <h2><svg class="ico" viewBox="0 0 24 24" width="16" height="16" stroke="var(--blue)" stroke-width="2" fill="none"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> شبیه‌ساز زنده عدالت در صف (Live Queue Preview)</h2>
+          <div class="actions">
+            <select id="sim-algo-select" onchange="loadQueuePreview(this.value)">
+              <option value="">الگوریتم فعلی سیستم</option>
+              <option value="fair_round_robin">Fair Round-Robin</option>
+              <option value="weighted_fair">Weighted Fair (WFQ)</option>
+              <option value="strict_fifo">Strict FIFO</option>
+              <option value="size_aware_fair">Size-Aware Fair</option>
+            </select>
+            <button class="btn" onclick="loadQueuePreview()">بروزرسانی</button>
+          </div>
+        </div>
+        <p style="color:var(--ink-mut);font-size:12px;margin:8px 0 14px 0">
+          این شبیه‌ساز، صف فعلی در دیتابیس را بر اساس الگوریتم انتخابی مرتب کرده و ترتیب دقیق ورود کارها به ورکرها را نشان می‌دهد.
+        </p>
+        <div class="table-wrap" style="max-height:560px;overflow-y:auto">
+          <table id="table-queue-preview">
+            <thead>
+              <tr>
+                <th style="width:50px">نوبت</th>
+                <th>شناسه کار</th>
+                <th>کاربر</th>
+                <th>وضعیت</th>
+                <th>حجم فایل</th>
+                <th>زمان ورود</th>
+                <th>امتیاز/وزن</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td colspan="7" class="empty">در حال دریافت داده‌های شبیه‌ساز صف...</td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   </section>
@@ -1243,6 +1403,7 @@ $("#nav-tabs").addEventListener("click", e => {
 function loadTabData(tabId) {
   if (tabId === "overview") loadOverview();
   else if (tabId === "tasks") loadTasks();
+  else if (tabId === "config") { loadConfig(); loadQueuePreview(); }
   else if (tabId === "docker") loadDocker();
   else if (tabId === "bot_users") loadBotUsers();
   else if (tabId === "terminal") { $("#term-input").focus(); }
@@ -1297,15 +1458,45 @@ async function loadOverview() {
 
     // KPI values
     const c = summary.counters || {};
-    $("#kpi-active").textContent = fa(c.active || 0);
-    $("#kpi-queue").textContent = fa(c.queued || 0);
-    $("#kpi-completed").textContent = fa(c.completed || 0);
-    $("#kpi-failed").textContent = fa(c.failed || 0);
+    const maxWorkers = c.max_concurrent || 3;
+    const maxQueue = c.max_queue || 500;
+
+    // Card 1: Active
+    $("#kpi-active").textContent = `${fa(c.active || 0)} / ${fa(maxWorkers)}`;
+    const dCnt = c.active_downloads || 0;
+    const eCnt = c.active_encodes !== undefined ? c.active_encodes : (c.active || 0);
+    const uCnt = c.active_uploads || 0;
+    if ($("#kpi-active-sub")) {
+      $("#kpi-active-sub").textContent = `${fa(dCnt)} دانلود | ${fa(eCnt)} انکود | ${fa(uCnt)} آپلود`;
+    }
+
+    // Card 2: Queued
+    $("#kpi-queue").textContent = `${fa(c.queued || 0)} / ${fa(maxQueue)}`;
+    const qSub = $("#kpi-queue").parentElement.querySelector(".sub");
+    if (qSub) {
+      qSub.textContent = c.est_clear_time_fa ? `تخلیه صف: ~${c.est_clear_time_fa}` : "در انتظار نوبت پردازش";
+    }
+
+    // Card 3: Completed Today
+    $("#kpi-completed").textContent = `${fa(c.completed || 0)} ویدیو`;
+    const compSub = $("#kpi-completed").parentElement.querySelector(".sub");
+    if (compSub) {
+      if (c.bytes_saved_today) {
+        const gb = (c.bytes_saved_today / 1073741824).toFixed(1);
+        compSub.textContent = `${gb} GB صرفه‌جویی حجم`;
+      } else {
+        compSub.textContent = "تکمیل موفق ویدیوها";
+      }
+    }
+
+    // Card 4: Failed Today
+    $("#kpi-failed").textContent = `${fa(c.failed || 0)} خطا`;
+
     if ($("#tab-cnt-active")) $("#tab-cnt-active").textContent = (c.active || 0) + (c.queued || 0);
 
     if (metrics.disk) {
       $("#kpi-disk").innerHTML = `<bdi dir="ltr">${fa(metrics.disk.free_gb)} GB</bdi> آزاد`;
-      $("#kpi-disk-sub").innerHTML = `از <bdi dir="ltr">${fa(metrics.disk.total_gb)} GB</bdi> (<bdi dir="ltr">${fa(metrics.disk.used_percent)}%</bdi> مصرف)`;
+      $("#kpi-disk-sub").innerHTML = `${fa(metrics.disk.used_percent)}% مصرف (${fa(metrics.disk.total_gb)} GB) <button class="btn" style="padding:2px 8px;font-size:10px;margin-right:6px;" onclick="cleanTempFiles(event)">🧹 پاکسازی موقت</button>`;
     }
     if (metrics.memory) {
       $("#kpi-ram").innerHTML = `<bdi dir="ltr">${fa(metrics.memory.percent)}%</bdi>`;
@@ -1394,8 +1585,12 @@ async function loadTasks() {
     const items = Array.isArray(data) ? data : (data.items || data.jobs || []);
     if ($("#tab-cnt-active")) $("#tab-cnt-active").textContent = items.length;
 
+    const checkAll = $("#check-all-tasks");
+    if (checkAll) checkAll.checked = false;
+    updateBatchCancelBtn();
+
     if (!items.length) {
-      $("#table-tasks tbody").innerHTML = '<tr><td colspan="8" class="empty">تسک فشرده‌سازی در این بخش یافت نشد.</td></tr>';
+      $("#table-tasks tbody").innerHTML = '<tr><td colspan="9" class="empty">تسک فشرده‌سازی در این بخش یافت نشد.</td></tr>';
       return;
     }
 
@@ -1431,24 +1626,45 @@ async function loadTasks() {
 
       const rawTime = t.created_at || (t.timings && t.timings.enqueued_at) || t.enqueued_at || "";
       const timeStr = rawTime ? String(rawTime).slice(0, 19).replace("T", " ") : "—";
-      const canCancel = st === "processing" || st === "queued";
       const profileName = t.profile || t.preset || "default";
 
+      let stageBadge = "";
+      if (st === 'queued') {
+        const pos = t.queue_pos || t.position || '—';
+        stageBadge = `<span class="badge" style="color:var(--amber);border-color:rgba(245,158,11,0.35)">جایگاه: ${fa(pos)}</span>`;
+      } else if (st === 'processing') {
+        const stageFa = t.stage_fa || (t.stage === 'download' ? 'دانلود' : (t.stage === 'upload' ? 'آپلود' : 'انکود'));
+        stageBadge = `<div><span class="pill p-processing">${esc(stageFa)}</span> <div class="prog-bar" style="display:inline-block;width:50px;vertical-align:middle;margin:0 4px"><span style="width:${pct}%"></span></div> <bdi dir="ltr">${pct}%</bdi></div>`;
+      } else if (st === 'completed') {
+        stageBadge = `<span class="pill p-completed">${esc(stLabel)}</span>`;
+      } else if (st === 'failed') {
+        stageBadge = `<span class="pill p-failed">${esc(stLabel)}</span>`;
+      } else {
+        stageBadge = `<span class="pill p-${esc(st)}">${esc(stLabel)}</span>`;
+      }
+
+      let actionsHtml = "";
+      if (st === 'queued') {
+        actionsHtml = `<button class="btn pri" style="padding:2px 8px;font-size:11px" onclick="boostJob('${esc(id)}')">🚀 اولویت</button> <button class="btn danger" style="padding:2px 8px;font-size:11px" onclick="cancelJob('${esc(id)}')">❌ لغو</button>`;
+      } else if (st === 'processing') {
+        actionsHtml = `<button class="btn danger" style="padding:2px 8px;font-size:11px" onclick="cancelJob('${esc(id)}')">❌ لغو</button>`;
+      } else if (st === 'failed' || st === 'cancelled') {
+        actionsHtml = `<button class="btn success" style="padding:2px 8px;font-size:11px" onclick="retryJob('${esc(id)}')">🔄 تلاش مجدد</button>`;
+      } else {
+        actionsHtml = '—';
+      }
+
       return `
-        <tr class="clickable">
+        <tr>
+          <td><input type="checkbox" class="task-check" value="${esc(id)}" onchange="updateBatchCancelBtn()"></td>
           <td class="mono">#${esc(jid)}</td>
+          <td>${stageBadge}</td>
           <td><b>${esc(name)}</b></td>
           <td class="mono">${userStr}</td>
-          <td>
-            <span class="pill p-${esc(st)}">${esc(stLabel)}</span>
-            ${st === 'processing' ? `<div class="prog-bar"><span style="width:${pct}%"></span></div> <bdi dir="ltr">${pct}%</bdi>` : ''}
-          </td>
           <td><span class="badge"><bdi dir="ltr">${esc(profileName)}</bdi></span></td>
           <td class="mono"><bdi dir="ltr">${esc(sizeStr)}</bdi></td>
           <td class="mono"><bdi dir="ltr">${esc(timeStr)}</bdi></td>
-          <td>
-            ${canCancel ? `<button class="btn danger" onclick="cancelJob('${esc(id)}')">لغو کار</button>` : '—'}
-          </td>
+          <td>${actionsHtml}</td>
         </tr>
       `;
     }).join("");
@@ -1468,6 +1684,161 @@ async function cancelJob(id) {
     if (currentTab === "overview") loadOverview();
   } catch (e) {
     toast(`خطای لغو کار: ${e.message}`, "error");
+  }
+}
+
+async function boostJob(id) {
+  const shortId = typeof id === 'string' ? id.slice(0, 8) : id;
+  try {
+    await api(`/panel/api/job/${id}/boost`, { method: "POST" });
+    toast(`تسک #${shortId} با موفقیت به صدر صف منتقل شد`, "success");
+    loadTasks();
+  } catch (e) {
+    toast(`خطای اولویت‌دهی: ${e.message}`, "error");
+  }
+}
+
+async function retryJob(id) {
+  const shortId = typeof id === 'string' ? id.slice(0, 8) : id;
+  try {
+    await api(`/panel/api/job/${id}/retry`, { method: "POST" });
+    toast(`تسک #${shortId} برای پردازش مجدد ارسال شد`, "success");
+    loadTasks();
+  } catch (e) {
+    toast(`خطای تلاش مجدد: ${e.message}`, "error");
+  }
+}
+
+function toggleSelectAllTasks(master) {
+  $$(".task-check").forEach(cb => cb.checked = master.checked);
+  updateBatchCancelBtn();
+}
+
+function updateBatchCancelBtn() {
+  const any = $$(".task-check:checked").length;
+  const btn = $("#btn-batch-cancel");
+  if (btn) btn.style.display = any > 0 ? "inline-block" : "none";
+}
+
+async function batchCancelTasks() {
+  const selected = Array.from($$(".task-check:checked")).map(cb => cb.value);
+  if (!selected.length) return;
+  if (!confirm(`آیا از لغو ${selected.length} تسک انتخاب‌شده اطمینان دارید؟`)) return;
+  let success = 0;
+  for (const id of selected) {
+    try {
+      await api(`/panel/api/job/${id}/cancel`, { method: "POST" });
+      success++;
+    } catch (_) {}
+  }
+  toast(`${success} تسک با موفقیت لغو شدند`, "success");
+  loadTasks();
+}
+
+async function cleanTempFiles(e) {
+  if (e) e.stopPropagation();
+  if (!confirm("آیا از پاکسازی تمام فایل‌های موقت دانلود و انکود اطمینان دارید؟")) return;
+  try {
+    const res = await api("/panel/api/system/cleanup_temp", { method: "POST" });
+    toast(res.message || "پاکسازی فایل‌های موقت با موفقیت انجام شد", "success");
+    loadOverview();
+  } catch (err) {
+    toast("خطا در پاکسازی: " + err.message, "danger");
+  }
+}
+
+/* Dynamic Runtime Config */
+async function loadConfig() {
+  try {
+    const res = await api("/panel/api/config");
+    const settings = res.settings || {};
+    for (const [k, v] of Object.entries(settings)) {
+      const el = $(`#cfg-${k}`);
+      if (el) {
+        if (el.tagName === "SELECT") {
+          el.value = String(v);
+        } else {
+          el.value = v;
+        }
+      }
+    }
+  } catch (e) {
+    toast(`خطا در دریافت تنظیمات: ${e.message}`, "error");
+  }
+}
+
+async function saveDynamicConfig() {
+  const keys = [
+    "max_queue_size", "max_active_downloads", "active_encoding_workers", "max_active_uploads",
+    "queue_scheduling_algorithm", "fairness_starvation_threshold_sec", "fairness_size_bias_weight",
+    "queue_card_throttle_sec", "admin_queue_bypass",
+    "user_active_job_limit", "vip_active_job_limit", "user_cooldown_seconds",
+    "temp_cleanup_threshold_gb", "emergency_disk_threshold_gb", "max_job_retries"
+  ];
+  const payload = {};
+  for (const k of keys) {
+    const el = $(`#cfg-${k}`);
+    if (el) {
+      let val = el.value;
+      if (k === "admin_queue_bypass") {
+        payload[k] = val === "true";
+      } else if (k === "queue_scheduling_algorithm") {
+        payload[k] = String(val);
+      } else if (k.includes("weight") || k.includes("threshold_gb")) {
+        payload[k] = parseFloat(val);
+      } else {
+        payload[k] = parseInt(val, 10);
+      }
+    }
+  }
+  try {
+    const res = await api("/panel/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ settings: payload })
+    });
+    toast("تنظیمات با موفقیت ذخیره و به صورت آنی اعمال شدند", "success");
+    loadOverview();
+    loadQueuePreview();
+  } catch (e) {
+    toast(`خطا در ذخیره تنظیمات: ${e.message}`, "error");
+  }
+}
+
+async function loadQueuePreview(algorithm) {
+  const algo = algorithm !== undefined ? algorithm : ($("#sim-algo-select") ? $("#sim-algo-select").value : "");
+  const tbody = $("#table-queue-preview tbody");
+  if (!tbody) return;
+  tbody.innerHTML = '<tr><td colspan="7" class="empty">در حال محاسبه و شبیه‌سازی صف...</td></tr>';
+  try {
+    const url = algo ? `/panel/api/queue/preview?algorithm=${encodeURIComponent(algo)}` : `/panel/api/queue/preview`;
+    const res = await api(url);
+    const items = res.preview || res.items || [];
+    if (!items.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">در حال حاضر هیچ کاری در صف انتظار نیست</td></tr>';
+      return;
+    }
+    tbody.innerHTML = items.map((it, idx) => {
+      const jid = it.jid || (it.job_id ? String(it.job_id).slice(0, 8) : "—");
+      const name = it.user_name || it.username || it.user_id || "کاربر";
+      const isVip = Boolean(it.is_vip);
+      const sizeStr = it.file_size_bytes ? fmtBytes(it.file_size_bytes) : "—";
+      const timeStr = it.enqueued_at ? String(it.enqueued_at).slice(11, 19) : "—";
+      const scoreStr = it.computed_score !== undefined ? Number(it.computed_score).toFixed(2) : (it.priority || "50");
+      return `
+        <tr>
+          <td><span class="badge ${idx === 0 ? 'online' : ''}">#${idx + 1}</span></td>
+          <td class="mono">#${esc(jid)}</td>
+          <td><b>${esc(name)}</b></td>
+          <td>${isVip ? '<span class="badge" style="color:var(--amber);border-color:rgba(245,158,11,0.35)">VIP ⭐</span>' : '<span class="badge">عادی</span>'}</td>
+          <td class="mono"><bdi dir="ltr">${esc(sizeStr)}</bdi></td>
+          <td class="mono">${esc(timeStr)}</td>
+          <td class="mono">${esc(scoreStr)}</td>
+        </tr>
+      `;
+    }).join("");
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty" style="color:var(--red)">خطا: ${esc(e.message)}</td></tr>`;
   }
 }
 
@@ -1879,7 +2250,7 @@ async function loadBotUsers() {
       return `
         <tr>
           <td class="mono"><b>${esc(tgId)}</b></td>
-          <td><b>${fname}</b> ${isVip ? '<span class="badge" style="color:var(--amber);border-color:rgba(245,158,11,0.35)">VIP</span>' : ''}</td>
+          <td><b>${fname}</b> ${isVip ? '<span class="badge" style="color:var(--amber);border-color:rgba(245,158,11,0.35)">VIP ⭐</span>' : ''}</td>
           <td class="mono">${uname}</td>
           <td class="mono"><bdi dir="ltr">${fa(todayJobs)} کار</bdi></td>
           <td class="mono"><bdi dir="ltr">${fa(totalReq)}</bdi></td>
@@ -1890,8 +2261,17 @@ async function loadBotUsers() {
           </td>
           <td class="mono"><bdi dir="ltr">${esc(lastActive || '—')}</bdi></td>
           <td>
-            <button class="btn ${isBlocked ? 'success' : 'danger'}" onclick="toggleBanUser('${esc(tgId)}', ${!isBlocked})">
-              ${isBlocked ? 'آزادسازی' : 'مسدودسازی'}
+            <button class="btn ${isBlocked ? 'success' : 'danger'}" style="padding:2px 6px;font-size:11px" onclick="toggleBanUser('${esc(tgId)}', ${!isBlocked})">
+              ${isBlocked ? 'آزاد' : 'مسدود'}
+            </button>
+            <button class="btn ${isVip ? 'warn' : 'pri'}" style="padding:2px 6px;font-size:11px;margin-right:3px" onclick="toggleVipUser('${esc(tgId)}', ${!isVip})">
+              ${isVip ? 'لغو VIP' : 'اعطای VIP'}
+            </button>
+            <button class="btn" style="padding:2px 6px;font-size:11px;margin-right:3px" onclick="setUserQueueLimit('${esc(tgId)}')">
+              سقف صف
+            </button>
+            <button class="btn" style="padding:2px 6px;font-size:11px;margin-right:3px" onclick="sendDirectMessage('${esc(tgId)}')">
+              پیام
             </button>
           </td>
         </tr>
@@ -1917,6 +2297,48 @@ async function toggleBanUser(tgId, ban) {
     loadBotUsers();
   } catch (e) {
     toast(`خطای ${actionName}: ${e.message}`, "error");
+  }
+}
+
+async function toggleVipUser(tgId, makeVip) {
+  try {
+    const res = await api(`/panel/api/user/${tgId}/vip`, { method: "POST" });
+    toast(res.new ? "کاربر با موفقیت به VIP ارتقا یافت" : "وضعیت VIP کاربر لغو شد", "success");
+    loadBotUsers();
+  } catch (e) {
+    toast(`خطای تغییر وضعیت VIP: ${e.message}`, "error");
+  }
+}
+
+async function setUserQueueLimit(tgId) {
+  const lim = prompt("سقف مجاز تعداد کارهای همزمان در صف برای این کاربر را وارد کنید (یا خالی برای سهمیه پیش‌فرض):");
+  if (lim === null) return;
+  const num = lim.trim() === "" ? null : parseInt(lim.trim(), 10);
+  try {
+    await api(`/panel/api/user/${tgId}/queue_limit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ custom_queue_limit: num })
+    });
+    toast("سقف صف کاربر با موفقیت بروزرسانی شد", "success");
+    loadBotUsers();
+  } catch (e) {
+    toast(`خطای ثبت سقف صف: ${e.message}`, "error");
+  }
+}
+
+async function sendDirectMessage(tgId) {
+  const text = prompt(`متن پیام مستقیم از طرف ربات به کاربر #${tgId}:`);
+  if (!text || !text.trim()) return;
+  try {
+    await api(`/panel/api/user/${tgId}/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: text.trim() })
+    });
+    toast("پیام با موفقیت به کاربر ارسال شد", "success");
+  } catch (e) {
+    toast(`خطای ارسال پیام: ${e.message}`, "error");
   }
 }
 

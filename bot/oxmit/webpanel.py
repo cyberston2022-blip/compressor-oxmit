@@ -227,16 +227,69 @@ def _build_summary(db, cfg, state) -> dict:
 
 async def summary_data(engine, db, cfg, state) -> dict:
     data = _build_summary(db, cfg, state)
-    data["active"] = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'processing'")
-    data["queued"] = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'queued'")
-    data["jobs_today"] = await db.fetchval(
-        "SELECT count(*) FROM jobs WHERE enqueued_at > now() - interval '24 hours'")
-    data["users_total"] = await db.fetchval("SELECT count(*) FROM users")
+
+    dyn = getattr(engine, "dynamic_config", None)
+    max_queue = dyn.get_int("max_global_queue_size", 500) if dyn else 500
+    max_workers = dyn.get_int("active_encoding_workers", cfg.worker_replicas) if dyn else cfg.worker_replicas
+
+    active_cnt = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'processing'") or 0
+    queued_cnt = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'queued'") or 0
+
+    # Today stats calculated from 00:00:00 Asia/Tehran
+    completed_today = await db.fetchval(
+        """
+        SELECT count(*) FROM jobs
+        WHERE status = 'completed'
+          AND completed_at >= (now() AT TIME ZONE 'Asia/Tehran')::date AT TIME ZONE 'Asia/Tehran'
+        """
+    ) or 0
+    failed_today = await db.fetchval(
+        """
+        SELECT count(*) FROM jobs
+        WHERE status = 'failed'
+          AND completed_at >= (now() AT TIME ZONE 'Asia/Tehran')::date AT TIME ZONE 'Asia/Tehran'
+        """
+    ) or 0
+    bytes_saved_today = await db.fetchval(
+        """
+        SELECT COALESCE(SUM(GREATEST(0, source_size - output_size)), 0) FROM jobs
+        WHERE status = 'completed'
+          AND completed_at >= (now() AT TIME ZONE 'Asia/Tehran')::date AT TIME ZONE 'Asia/Tehran'
+        """
+    ) or 0
+
+    downloading_cnt = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'processing' AND stage = 'downloading'") or 0
+    encoding_cnt = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'processing' AND stage = 'encoding'") or 0
+    uploading_cnt = await db.fetchval(
+        "SELECT count(*) FROM jobs WHERE status = 'processing' AND stage IN ('uploading','completing','validating','archiving')"
+    ) or 0
+
+    data["active"] = active_cnt
+    data["queued"] = queued_cnt
+    data["max_queue"] = max_queue
+    data["max_concurrent"] = max_workers
+    data["jobs_today"] = completed_today + failed_today
+    data["users_total"] = await db.fetchval("SELECT count(*) FROM users") or 0
+
     counters = {r["name"]: r["value"] for r in await db.fetch(
         "SELECT name, value FROM counters WHERE name IN "
         "('requests_total','jobs_encoded','jobs_failed','deliveries_ok','deliveries_failed',"
         "'bytes_saved','bytes_in','bytes_out','dedup_exact_reuse','dedup_inflight_joined',"
         "'dedup_similarity_reuse','no_gain_events')")}
+
+    # Single Source of Truth for KPIs
+    counters["active"] = active_cnt
+    counters["queued"] = queued_cnt
+    counters["completed"] = completed_today
+    counters["failed"] = failed_today
+    counters["downloading"] = downloading_cnt
+    counters["encoding"] = encoding_cnt
+    counters["uploading"] = uploading_cnt
+    counters["max_queue"] = max_queue
+    counters["max_concurrent"] = max_workers
+    counters["bytes_saved_today"] = bytes_saved_today
+    counters["bytes_saved_today_gb"] = round(bytes_saved_today / (1024**3), 2)
+
     data["counters"] = counters
     # get_me goes through the engine cache (SPEC-02): this route is polled
     # every 4s per client, a live call each time hammered the Local Bot API.
@@ -267,9 +320,9 @@ async def active_data(db) -> list:
         FROM jobs j
         LEFT JOIN users u ON u.tg_id = j.requester_tg_id
         LEFT JOIN media_assets m ON m.id = j.media_id
-        WHERE j.status IN ('queued','processing')
-        ORDER BY j.enqueued_at
-        LIMIT 20
+        WHERE j.status = 'processing'
+        ORDER BY j.started_at DESC NULLS LAST, j.enqueued_at ASC
+        LIMIT 50
         """
     )
     out = []
@@ -784,6 +837,15 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             await audit_mod.log_action(db, session["actor"], "admin", "job.retry",
                                        jid, None, "web", _ip(request))
             return _json({"ok": True})
+        if action == "boost":
+            await db.execute(
+                "UPDATE jobs SET priority_boost = COALESCE(priority_boost, 0) + 100, updated_at = now() "
+                "WHERE id = $1::uuid AND status = 'queued'", jid
+            )
+            engine.kick_dispatch()
+            await audit_mod.log_action(db, session["actor"], "admin", "job.boost",
+                                       jid, None, "web", _ip(request))
+            return _json({"ok": True})
         if action == "redeliver":
             job = await db.fetchrow("SELECT * FROM jobs WHERE id = $1::uuid AND status = 'completed'", jid)
             if job is None:
@@ -891,6 +953,17 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
             await audit_mod.log_action(db, session["actor"], "admin", "user.limits",
                                        tg_id, str(vals), "web", _ip(request))
             return _json({"ok": True, "limits": vals})
+        if action == "queue_limit":
+            try:
+                body = await request.json()
+            except Exception:
+                return _json({"error": "bad json"}, 400)
+            lim = body.get("limit")
+            val = int(lim) if lim and int(lim) > 0 else None
+            await db.execute("UPDATE users SET custom_queue_limit = $2 WHERE tg_id = $1", tg_id, val)
+            await audit_mod.log_action(db, session["actor"], "admin", "user.queue_limit",
+                                       tg_id, str(val), "web", _ip(request))
+            return _json({"ok": True, "custom_queue_limit": val})
         return _json({"error": "unknown action"}, 400)
 
     async def system_action(request: web.Request) -> web.Response:
@@ -906,12 +979,12 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
                                        "intake.pause" if paused else "intake.resume",
                                        None, None, "web", _ip(request))
             return _json({"ok": True, "paused": paused})
-        if action == "cleanup":
+        if action in ("cleanup", "cleanup_temp"):
             await engine.cleanup_sweep()
             free = shutil.disk_usage(cfg.media_root).free
             await audit_mod.log_action(db, session["actor"], "admin", "system.cleanup",
                                        None, None, "web", _ip(request))
-            return _json({"ok": True, "disk_free": free})
+            return _json({"ok": True, "disk_free": free, "free_gb": round(free / (1024**3), 1)})
         if action == "reconcile":
             drift = await db.reconcile_counters()
             await audit_mod.log_action(db, session["actor"], "admin", "system.reconcile",
@@ -1290,6 +1363,43 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
     app.router.add_post("/panel/api/job/{job_id}/cancel", require_owner(job_cancel_handler))
     app.router.add_get("/panel/api/compression/presets", require_owner(compression_presets_handler))
     app.router.add_get("/panel/api/compression/workers", require_owner(compression_workers_handler))
+
+    async def config_get_handler(request: web.Request) -> web.Response:
+        dyn = getattr(engine, "dynamic_config", None)
+        if not dyn:
+            return _json({"error": "dynamic config not initialized"}, 500)
+        return _json({"settings": dyn.get_all()})
+
+    async def config_post_handler(request: web.Request) -> web.Response:
+        session = _post_session(request)
+        if session is None:
+            return _json({"error": "unauthorized"}, 401)
+        dyn = getattr(engine, "dynamic_config", None)
+        if not dyn:
+            return _json({"error": "dynamic config not initialized"}, 500)
+        try:
+            body = await request.json()
+        except Exception:
+            return _json({"error": "bad json"}, 400)
+        settings = body.get("settings", {})
+        if not isinstance(settings, dict):
+            return _json({"error": "settings must be an object"}, 400)
+        for k, v in settings.items():
+            await dyn.set(k, v, admin_tg_id=session.get("actor"))
+            await audit_mod.log_action(db, session["actor"], "admin", f"config.{k}", None, str(v), "web", _ip(request))
+        return _json({"ok": True, "settings": dyn.get_all()})
+
+    async def queue_preview_handler(request: web.Request) -> web.Response:
+        sched = getattr(engine, "queue_scheduler", None)
+        if not sched:
+            return _json({"items": []})
+        mode = request.query.get("mode")
+        items = await sched.preview_queue_order(mode=mode, limit=100)
+        return _json({"items": items, "mode": mode or sched.cfg.get_str("queue_scheduling_mode", "fair_round_robin")})
+
+    app.router.add_get("/panel/api/config", require_owner(config_get_handler))
+    app.router.add_post("/panel/api/config", require_owner(config_post_handler))
+    app.router.add_get("/panel/api/queue/preview", require_owner(queue_preview_handler))
 
     app.router.add_post("/panel/api/job/{job_id}/{action}", require_owner(job_action))
     app.router.add_post("/panel/api/user/{tg_id}/{action}", require_owner(user_action))
@@ -1785,10 +1895,10 @@ function renderSummary(s){const c=s.counters||{};
 $('#kpis').innerHTML=
 kpiCard('جاب ۲۴ ساعت',fa(s.jobs_today??'—'),fa(c.requests_total||0)+' درخواست کل','📥')+
 kpiCard('نرخ تحویل',(c.deliveries_ok&&c.deliveries_failed!=null)?fa(Math.round(100*c.deliveries_ok/Math.max(1,c.deliveries_ok+c.deliveries_failed)))+'٪':'—',fa(c.deliveries_ok||0)+' موفق / '+fa(c.deliveries_failed||0)+' ناموفق','✅')+
-kpiCard('صف فعلی',fa(s.queued??'—')+'<span style="font-size:13px;color:var(--mut)">/'+fa(50)+'</span>',fa(s.active??0)+' انکد فعال از '+fa(s.max_concurrent),'⏳')+
+kpiCard('صف فعلی',fa(s.queued??'—')+'<span style="font-size:13px;color:var(--mut)">/'+fa(s.max_queue||500)+'</span>',fa(s.active??0)+' انکد فعال از '+fa(s.max_concurrent||2),'⏳')+
 kpiCard('صرفه‌جویی کل',fmtB(c.bytes_saved||0),fmtB(c.bytes_in||0)+' → '+fmtB(c.bytes_out||0),'💰')+
 kpiCard('دیسک آزاد',fmtB(s.disk_free),'مصرف '+fa(s.disk_pct)+'٪','💾');
-$('#act-sub').textContent=fa((s.active||0))+' انکد فعال از '+fa(s.max_concurrent)+' ورکر';
+$('#act-sub').textContent=fa((s.active||0))+' انکد فعال از '+fa(s.max_concurrent||2)+' ورکر';
 $('#pause-sw').checked=!s.paused;$('#pause-note').hidden=!s.paused;
 document.getElementById('nav-jobs').hidden=!(s.queued||s.active);
 document.getElementById('nav-jobs').textContent=fa((s.queued||0)+(s.active||0));}

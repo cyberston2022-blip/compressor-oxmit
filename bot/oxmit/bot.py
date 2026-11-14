@@ -13,8 +13,10 @@ from aiogram.types import BotCommand
 
 from .config import load_settings
 from .db import Database
+from .dynamic_config import DynamicConfig
 from .encore_client import EncoreClient
 from .engine import JobEngine
+from .queue_scheduler import QueueScheduler
 from .handlers import admin, adminpanel, intake, menu, settings
 from .handlers import merge_flow, moderation, nav, owner, personal, support
 from .internal_api import start_internal_api
@@ -104,11 +106,14 @@ async def main() -> None:
     if drift:
         log.warning("lifecycle counters reconciled from row state",
                     extra={"detail": str(drift)})
+    dynamic_config = DynamicConfig(db)
+    await dynamic_config.init()
+    queue_scheduler = QueueScheduler(db, dynamic_config)
     redis_client = aioredis.from_url(cfg.redis_url, decode_responses=True)
     encre = EncoreClient(cfg.encre_base, cfg.encre_user, cfg.encre_password)
     session = _build_session(cfg)
     bot = Bot(token=cfg.bot_token, session=session)
-    engine = JobEngine(db, cfg, bot, encre)
+    engine = JobEngine(db, cfg, bot, encre, dynamic_config=dynamic_config, queue_scheduler=queue_scheduler)
 
     # runtime state from config + DB
     state = engine.state
