@@ -555,11 +555,14 @@ class QueueMixin:
             WHERE id = (
                 SELECT j.id FROM jobs j
                 WHERE j.status = 'queued'
-                ORDER BY EXISTS (
-                           SELECT 1 FROM jobs a
-                           WHERE a.requester_tg_id = j.requester_tg_id
-                             AND a.status = 'processing'
-                             AND a.stage = ANY($4::text[])),
+                ORDER BY (j.requester_tg_id IN (
+                              -- hashed InitPlan (one tiny scan of the <=slots
+                              -- processing rows) instead of a correlated
+                              -- EXISTS per queued row: identical semantics,
+                              -- keeps claim latency flat in deep queues
+                              SELECT a.requester_tg_id FROM jobs a
+                              WHERE a.status = 'processing'
+                                AND a.stage = ANY($4::text[]))) DESC,
                          j.priority
                            + LEAST(15, FLOOR(EXTRACT(EPOCH FROM
                                  (now() - j.enqueued_at)) / 3600.0) * 5)::int
