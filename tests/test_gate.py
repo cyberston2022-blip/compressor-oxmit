@@ -33,8 +33,9 @@ def make_state(gate_channel="", gate_channel_id=""):
 
 
 class StubChat:
-    def __init__(self, cid, username=None, invite_link=None):
+    def __init__(self, cid, username=None, invite_link=None, ctype="channel"):
         self.id = cid
+        self.type = ctype
         self.username = username
         self.invite_link = invite_link  # ChatInviteLink-like or str
 
@@ -185,29 +186,40 @@ async def test_note_channel_event_resolves_and_persists():
     assert await gate.note_channel_event(bot, -100333) is False
 
 
-async def test_trusted_forward_accepts_admin_channel_without_visible_link():
+async def test_secondary_link_falls_back_to_admin_verification():
+    """Real production case: the configured target is a SECONDARY invite
+    link; getChat only exposes the primary. Capture must still resolve via
+    bot-admin structural checks (and never for the archive channel)."""
     db, state = FakeDB(), make_state("https://t.me/+abc123")
     gate = GateService(db, state)
-    # no visible primary invite link (bot lacks can_invite_users right)
-    bot = StubBot(chats={-100777: StubChat(-100777)},
-                  members={(-100777, 999000111): "administrator"})
-    assert await gate.verify_candidate(bot, -100777) is False        # strict
-    assert await gate.note_channel_event(bot, -100777) is False      # strict event
-    assert await gate.verify_candidate(bot, -100777, trusted=True) is True
-    assert await gate.note_channel_event(bot, -100777, trusted=True) is True
+    bot = StubBot(chats={-100777: StubChat(-100777, invite_link=SimpleNamespace(
+        invite_link="https://t.me/+primaryXX"))},
+        members={(-100777, 999000111): "administrator"})
+    assert await gate.verify_candidate(bot, -100777) is False       # strict only
+    assert await gate.note_channel_event(bot, -100777) is True      # admin fallback
     assert state.gate_channel_id == "-100777"
 
 
-async def test_trusted_forward_rejects_non_admin_and_archive():
+async def test_admin_fallback_rejects_non_admin_and_archive():
     db, state = FakeDB(), make_state("https://t.me/+abc123")
     state.archive_channel_id = -100999
     gate = GateService(db, state)
     no_admin = StubBot(chats={-100777: StubChat(-100777)}, members={})
-    assert await gate.verify_candidate(no_admin, -100777, trusted=True) is False
+    assert await gate.verify_candidate(no_admin, -100777) is False
     arch_bot = StubBot(chats={-100999: StubChat(-100999)},
                        members={(-100999, 999000111): "administrator"})
     # archive channel is rejected even though the bot is admin there
-    assert await gate.verify_candidate(arch_bot, -100999, trusted=True) is False
+    assert await gate.verify_candidate(arch_bot, -100999) is False
+
+
+async def test_trusted_forward_accepts_admin_channel():
+    db, state = FakeDB(), make_state("https://t.me/+abc123")
+    gate = GateService(db, state)
+    bot = StubBot(chats={-100777: StubChat(-100777)},
+                  members={(-100777, 999000111): "administrator"})
+    assert await gate.verify_candidate(bot, -100777, trusted=True) is True
+    assert await gate.note_channel_event(bot, -100777, trusted=True) is True
+    assert state.gate_channel_id == "-100777"
 
 
 async def test_set_target_clears_stale_resolution():

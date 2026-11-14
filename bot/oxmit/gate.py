@@ -156,12 +156,13 @@ class GateService:
                                trusted: bool = False) -> bool:
         """Verify a captured chat really is the configured gate channel.
 
-        trusted=True (owner forward of a channel post) additionally accepts
-        a channel where the bot itself is admin, when the primary invite
-        link is not visible (bot without can_invite_users right) - the
-        owner's explicit forward is the authoritative signal then. The
-        archive channel is always rejected: the bot is admin there too and
-        an owner forwarding an archive post must not gate on it.
+        Strict check: the chat's visible invite link equals the configured
+        target. getChat only exposes the chat's PRIMARY invite link, while
+        the configured target may be a secondary link the owner created
+        separately - in that case fall back to structural verification:
+        the chat is a channel where the bot itself is administrator and it
+        is NOT the archive channel (the bot is admin there too, and its
+        constant output posts must never capture as the gate channel).
         """
         kind, value = normalize_gate_target(self.target)
         if kind in ("off", "invalid"):
@@ -180,17 +181,22 @@ class GateService:
         if isinstance(link_str, str) and _invite_hash(value) and \
                 _invite_hash(link_str) == _invite_hash(value):
             return True
-        if not trusted:
+        # structural fallback (primary link differs from / hides the target)
+        if getattr(full, "type", "") != "channel":
             return False
         arch = getattr(self.state, "archive_channel_id", None)
         if arch and str(chat_id) == str(arch):
-            log.warning("trusted capture rejected: chat is the archive channel")
+            log.warning("gate capture rejected: chat is the archive channel")
             return False
         try:
             member = await bot.get_chat_member(int(chat_id), bot.id)
-            return getattr(member, "status", "") == "administrator"
+            ok = getattr(member, "status", "") == "administrator"
         except Exception:  # noqa: BLE001
-            return False
+            ok = False
+        if ok:
+            log.warning("gate candidate accepted via admin fallback "
+                        "(chat's primary invite link differs from target)")
+        return ok
 
     async def note_channel_event(self, bot: Bot, chat_id: int | str,
                                  trusted: bool = False) -> bool:
