@@ -144,8 +144,17 @@ class GateService:
         return cid
 
     # ------------------------------------------------------------------
-    async def verify_candidate(self, bot: Bot, chat_id: int | str) -> bool:
-        """Verify a captured chat really is the configured gate channel."""
+    async def verify_candidate(self, bot: Bot, chat_id: int | str,
+                               trusted: bool = False) -> bool:
+        """Verify a captured chat really is the configured gate channel.
+
+        trusted=True (owner forward of a channel post) additionally accepts
+        a channel where the bot itself is admin, when the primary invite
+        link is not visible (bot without can_invite_users right) - the
+        owner's explicit forward is the authoritative signal then. The
+        archive channel is always rejected: the bot is admin there too and
+        an owner forwarding an archive post must not gate on it.
+        """
         kind, value = normalize_gate_target(self.target)
         if kind in ("off", "invalid"):
             return False
@@ -160,19 +169,30 @@ class GateService:
                 value.lstrip("@").lower()
         link = getattr(full, "invite_link", None)
         link_str = getattr(link, "invite_link", None) or link
-        if not isinstance(link_str, str) or not _invite_hash(value):
+        if isinstance(link_str, str) and _invite_hash(value) and \
+                _invite_hash(link_str) == _invite_hash(value):
+            return True
+        if not trusted:
             return False
-        return bool(_invite_hash(link_str)) and \
-            _invite_hash(link_str) == _invite_hash(value)
+        arch = getattr(self.state, "archive_channel_id", None)
+        if arch and str(chat_id) == str(arch):
+            log.warning("trusted capture rejected: chat is the archive channel")
+            return False
+        try:
+            member = await bot.get_chat_member(int(chat_id), bot.id)
+            return getattr(member, "status", "") == "administrator"
+        except Exception:  # noqa: BLE001
+            return False
 
-    async def note_channel_event(self, bot: Bot, chat_id: int | str) -> bool:
+    async def note_channel_event(self, bot: Bot, chat_id: int | str,
+                                 trusted: bool = False) -> bool:
         """Try to capture the gate channel id from a live channel event."""
         if not self.active or self.resolved_id:
             return False
-        if not await self.verify_candidate(bot, chat_id):
+        if not await self.verify_candidate(bot, chat_id, trusted=trusted):
             return False
         log.info("gate channel resolved from channel event",
-                 extra={"detail": f"chat={chat_id}"})
+                 extra={"detail": f"chat={chat_id} trusted={trusted}"})
         await self._persist_id(str(chat_id))
         return True
 
@@ -387,7 +407,7 @@ def build_gate_router(engine, db, cfg, state, gate: GateService) -> Router:
         if chat is None or getattr(chat, "type", "") != "channel":
             raise SkipHandler
         try:
-            resolved = await gate.note_channel_event(bot, chat.id)
+            resolved = await gate.note_channel_event(bot, chat.id, trusted=True)
         except Exception:  # noqa: BLE001
             log.exception("gate forward capture failed")
             resolved = False

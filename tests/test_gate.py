@@ -44,6 +44,8 @@ class StubBot:
     (mirrors Bot API). get_chat_member: status from self.members, 'ERROR'
     raises (simulates a Telegram API failure)."""
 
+    id = 999000111  # the bot's own tg id (parsed from token in real aiogram)
+
     def __init__(self, chats=None, members=None):
         self.chats = chats or {}
         self.members = members or {}
@@ -168,6 +170,31 @@ async def test_note_channel_event_resolves_and_persists():
     assert db.cfg["gate_channel_id"] == "-100222"
     # second event is a no-op once resolved
     assert await gate.note_channel_event(bot, -100333) is False
+
+
+async def test_trusted_forward_accepts_admin_channel_without_visible_link():
+    db, state = FakeDB(), make_state("https://t.me/+abc123")
+    gate = GateService(db, state)
+    # no visible primary invite link (bot lacks can_invite_users right)
+    bot = StubBot(chats={-100777: StubChat(-100777)},
+                  members={(-100777, 999000111): "administrator"})
+    assert await gate.verify_candidate(bot, -100777) is False        # strict
+    assert await gate.note_channel_event(bot, -100777) is False      # strict event
+    assert await gate.verify_candidate(bot, -100777, trusted=True) is True
+    assert await gate.note_channel_event(bot, -100777, trusted=True) is True
+    assert state.gate_channel_id == "-100777"
+
+
+async def test_trusted_forward_rejects_non_admin_and_archive():
+    db, state = FakeDB(), make_state("https://t.me/+abc123")
+    state.archive_channel_id = -100999
+    gate = GateService(db, state)
+    no_admin = StubBot(chats={-100777: StubChat(-100777)}, members={})
+    assert await gate.verify_candidate(no_admin, -100777, trusted=True) is False
+    arch_bot = StubBot(chats={-100999: StubChat(-100999)},
+                       members={(-100999, 999000111): "administrator"})
+    # archive channel is rejected even though the bot is admin there
+    assert await gate.verify_candidate(arch_bot, -100999, trusted=True) is False
 
 
 async def test_set_target_clears_stale_resolution():
