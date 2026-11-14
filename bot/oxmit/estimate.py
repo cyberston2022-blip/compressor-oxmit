@@ -38,8 +38,17 @@ _TIME_MIN, _TIME_MAX = 5, 6 * 3600
 
 _CODEC_BPP = {"h264": 1.0, "x264": 1.0, "hevc": 0.55, "h265": 0.55, "x265": 0.55}
 _CODEC_TIME = {"h264": 1.0, "x264": 1.0, "hevc": 2.5, "h265": 2.5, "x265": 2.5}
-_PRESET_TIME = {"ultrafast": 6.0, "superfast": 4.5, "veryfast": 3.5,
-                "faster": 2.6, "fast": 2.0, "medium": 1.0, "slow": 0.6}
+# Encode throughput model, calibrated 2026-11-14 on the production worker
+# (2.25 cores, threads=3, ffmpeg 7.0.2): x264 veryfast at 854x480 ran
+# 240s of real lecture video in ~37s wall => ~6.5x realtime, i.e. ~1.29x
+# realtime for a 1080p-equivalent frame budget. _PRESET_SPEED holds the
+# measured speed ratio per preset relative to veryfast (benchmarked round
+# trip; the old "cost multiplier" ladder predicted 3.5x worse and made the
+# intake card say "83 min - 6 h" for jobs that take ~18 min).
+_BASE_SPEED_1080P = 1.29  # x realtime at 1920x1080-equivalent, x264 veryfast
+_PRESET_SPEED = {"ultrafast": 1.30, "superfast": 1.15, "veryfast": 1.0,
+                 "faster": 0.79, "fast": 0.73, "medium": 0.60,
+                 "slow": 0.42, "slower": 0.30}
 
 
 def _duration(value) -> float | None:
@@ -107,9 +116,10 @@ def estimate_encode_seconds(duration_s, out_pixels: float, codec: str,
     duration = _duration(duration_s)
     if duration is None or out_pixels <= 0:
         return (0, 0)
-    factor = _PRESET_TIME.get((preset or "medium").lower(), 1.0)
-    divisor = max(factor * (out_pixels / _PIXELS_1080P), 0.01)
-    point = duration * _CODEC_TIME.get(codec, 1.0) / divisor
+    speed = _PRESET_SPEED.get((preset or "medium").lower(), 0.6)
+    point = (duration * (out_pixels / _PIXELS_1080P)
+             * _CODEC_TIME.get(codec, 1.0)
+             / max(speed * _BASE_SPEED_1080P, 0.01))
     if not math.isfinite(point) or point <= 0:
         return (0, 0)
     low = min(max(round(point * _TIME_LOW), _TIME_MIN), _TIME_MAX)

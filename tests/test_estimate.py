@@ -53,6 +53,16 @@ def test_bpp_base_override_is_honored():
     assert tiny_lo < mid_lo < big_lo
 
 
+def test_encode_seconds_calibrated_to_benchmark():
+    # 2026-11-14: the owner's real 1h54m 720p lecture encoded a 240s segment
+    # in ~37s wall on the production worker (6.5x realtime at 480p veryfast).
+    # The whole file must estimate ~18 min, not hours (old model said 83min+).
+    low, high = estimate_encode_seconds(6883.0, 409600, "h264", "veryfast")
+    assert 400 <= low <= 1300
+    assert high >= low
+    assert high <= 6 * 3600
+
+
 def test_format_helpers():
     text = format_size_range(1000, 2000)
     assert "1000" in text or "KB" in text
