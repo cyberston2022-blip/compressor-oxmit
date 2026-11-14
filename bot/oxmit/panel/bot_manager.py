@@ -14,6 +14,7 @@ from typing import Any
 
 from .. import audit as audit_mod
 from .. import permissions
+from ..gate import normalize_gate_target
 from ..log import get_logger
 
 log = get_logger("oxmit.panel.bot")
@@ -304,8 +305,10 @@ class BroadcastManager:
 # SEC: the panel config API exposes only operational toggles. Everything
 # else (archive_channel_id, limits, audit keys, ...) stays DB-authoritative
 # and is never echoed to the browser; arbitrary key writes are rejected.
-CONFIG_READ_KEYS = ("access_mode", "paused", "global_thumb_path")
-CONFIG_WRITE_KEYS = ("paused", "access_mode", "global_thumb_path")
+CONFIG_READ_KEYS = ("access_mode", "paused", "global_thumb_path",
+                    "gate_channel", "gate_channel_id")
+CONFIG_WRITE_KEYS = ("paused", "access_mode", "global_thumb_path",
+                     "gate_channel")
 
 
 async def get_bot_config(db: Any, state: Any) -> dict[str, Any]:
@@ -364,6 +367,18 @@ async def update_bot_config(
                 "error": f"configuration keys not allowed: {', '.join(sorted(rejected))}"}
 
     for k, v in items:
+        if k == "gate_channel":
+            # normalize + validate; a target change invalidates the resolved
+            # chat id until the next channel event / owner forward
+            kind, canonical = normalize_gate_target(v)
+            if kind == "invalid":
+                return {"status": "error",
+                        "error": "gate_channel must be an invite link (t.me/+...), "
+                                 "@username, or numeric chat id"}
+            v = canonical
+            state.gate_channel = canonical
+            state.gate_channel_id = ""
+            await db.set_config("gate_channel_id", "")
         await db.set_config(k, v)
         updated[k] = v
         if k == "paused":

@@ -49,6 +49,9 @@ class RuntimeState:
     global_thumb: str | None = None
     owner_only: bool = False
     access_mode: str = "public"
+    # channel-membership gate (force-join): configured target + resolved id
+    gate_channel: str = ""
+    gate_channel_id: str = ""
 
 
 class AdmissionError(Exception):
