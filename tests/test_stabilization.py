@@ -396,10 +396,15 @@ async def test_owner_middleware_access_mode_is_single_authority():
     assert len(called) == 1  # public mode: non-owner passes despite OWNER_ONLY env
 
     state.access_mode = "private"
-    blocked = SimpleNamespace(from_user=SimpleNamespace(id=1000), answer=Recorder())
+    answers = []
+
+    async def _answer(text=None, reply_markup=None, show_alert=False):
+        answers.append(text)
+
+    blocked = SimpleNamespace(from_user=SimpleNamespace(id=1000), answer=_answer)
     await mw(handler, blocked, {})
     assert len(called) == 1  # non-owner blocked: no handler call
-    assert "خصوصی" in blocked.answer.answers[0]["text"]
+    assert "خصوصی" in answers[0]
 
     await mw(handler, SimpleNamespace(from_user=SimpleNamespace(id=42)), {})
     assert len(called) == 2  # owner always passes
