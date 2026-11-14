@@ -698,6 +698,10 @@ class QueueMixin:
                 return
             # 4) decide: compliant sources are remuxed, never re-encoded
             decision = edu480.decide(probe, size, self.cfg)
+            if decision.action == "encode":
+                guard = edu480.predict_guard(probe, size, self.cfg)
+                if guard is not None:
+                    decision = guard
             await self.db.execute("UPDATE jobs SET decision = $2 WHERE id = $1",
                                   uuid.UUID(job_id), f"{decision.action}: {decision.reason}"[:300])
             log.info("edu480 decision", extra={"job_id": job_id,
@@ -706,6 +710,9 @@ class QueueMixin:
                 self.fingerprinter.submit(row["media_id"], str(source), probe.get("duration_s") or 0.0)
             if decision.action == "remux":
                 await self._run_remux(job_id, source)
+                return
+            if decision.action == "deliver_source":
+                await self._deliver_source(job_id, source, probe)
                 return
             await self._submit_encode(job_id, row, source, probe)
         except asyncio.CancelledError:
@@ -846,6 +853,35 @@ class QueueMixin:
             "JOIN media_assets m ON m.id = j.media_id WHERE j.id = $1", uuid.UUID(job_id))
         if full and full["status"] == "processing":
             await self.complete_job(full, None)
+
+    async def _deliver_source(self, job_id: str, source: Path, probe: dict) -> None:
+        """Complete a job by delivering the SOURCE itself (predictive no-gain
+        skip). The user already owns this media and the deterministic bpp
+        guard says an encode would not shrink it meaningfully — so no CPU is
+        spent and no degraded copy is produced. Mirrors the no_gain branch
+        of the completion path; evidence lives in jobs.decision."""
+        jid = uuid.UUID(job_id)
+        done = await self.db.fetchval(
+            "UPDATE jobs SET status = 'completed', stage = 'completed', progress = 100, "
+            "archived = FALSE, is_no_gain = TRUE, output_size = source_size, "
+            "reserved_bytes = 0, completed_at = now(), "
+            "encode_done_at = COALESCE(encode_done_at, now()), updated_at = now() "
+            "WHERE id = $1 AND status = 'processing' RETURNING id", jid)
+        if not done:
+            return
+        await self.db.bump("no_gain_events")
+        await self.db.bump("jobs_encoded")
+        row = await self.db.fetchrow(
+            "SELECT j.*, m.duration_s AS source_duration, m.tg_file_id, m.sha256 AS m_sha "
+            "FROM jobs j JOIN media_assets m ON m.id = j.media_id WHERE j.id = $1", jid)
+        if row is None:
+            return
+        await self.push_stage_card(job_id)
+        await self._deliver_to_requesters(
+            row, None, row["media_id"], row["tg_file_id"],
+            no_gain=True, out_size=int(row["source_size"] or 0), out_probe=probe)
+        await self._finish_delivery(row, keep_output=False, keep_source=True)
+        self.kick_dispatch()
 
     async def _submit_encode(self, job_id: str, row, source: Path, probe: dict) -> None:
         used_path = await self._stage_source(job_id, source, row["source_filename"] or "source.mp4")

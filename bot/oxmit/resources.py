@@ -19,13 +19,29 @@ from .log import get_logger
 log = get_logger("oxmit.resources")
 
 
-def cores_for(active: int, single: float, multi: float, floor: float) -> float:
-    """Per-worker core budget for `active` running jobs."""
+def cores_for(active: int, pool: float, replicas: int, floor: float) -> float:
+    """Per-worker core budget (V3 §17: single source of truth).
+
+    The tuner writes the SAME NanoCPU value to every worker replica, so the
+    per-worker value must be capped at ``pool / replicas`` — otherwise the
+    replicas collectively request ``single × replicas`` and overcommit the
+    host (measured on Ohio: 3 × 4.5 = 13.5 requested on 8 vCPU dropped
+    aggregate throughput from ~104 to ~74 FPS).
+
+    Semantics:
+    - ``pool``       = WORKER_CPU_SINGLE = TOTAL worker-pool CPU budget.
+    - ``replicas``   = number of worker containers the tuner manages.
+    - ``floor``      = WORKER_CPU_MIN — never allocate below this per worker.
+    - ``WORKER_CPU_MULTI`` is advisory only (FFmpeg thread planning); the
+      per-worker CPU cap is derived from the pool to make overcommit
+      structurally impossible.
+    """
+    replicas = max(1, int(replicas))
+    cap = pool / replicas
     if active <= 1:
-        return single
-    if active == 2:
-        return multi
-    return max(floor, round(single / active, 2))
+        return round(cap, 2)
+    shared = min(cap, pool / max(1, active))
+    return round(max(shared, min(floor, cap)), 2)
 
 
 class WorkerCpuTuner:
@@ -57,11 +73,16 @@ class WorkerCpuTuner:
             return None
 
     async def tune(self, active: int) -> None:
-        """Apply the per-worker quota for `active` running jobs (debounced)."""
+        """Apply the per-worker quota for `active` running jobs (debounced).
+
+        The target is capped at pool/replicas so the SUM across replicas can
+        never exceed WORKER_CPU_SINGLE (overcommit guard, V3 §17).
+        """
         if self._disabled or active < 0:
             return
         target = cores_for(active, self.cfg.worker_cpu_single,
-                           self.cfg.worker_cpu_multi, self.cfg.worker_cpu_min)
+                           len(self.cfg.worker_container_names),
+                           self.cfg.worker_cpu_min)
         if self._last == target:
             return
         client = self._get_client()

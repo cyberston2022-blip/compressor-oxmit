@@ -199,6 +199,7 @@ T: dict[str, dict[str, str]] = {
         "en": "📉 Size change: {delta} (increase — no-gain policy applied)",
     },
     "summary_duration": {"fa": "⏱ مدت ویدیو: {dur}", "en": "⏱ Duration: {dur}"},
+    "summary_duration_unknown": {"fa": "⏱ مدت ویدیو: نامشخص", "en": "⏱ Duration: unknown"},
     "summary_res": {"fa": "📐 رزولوشن: {res}", "en": "📐 Resolution: {res}"},
     "summary_codec": {"fa": "🎞 کدک: {vc} / {ac}", "en": "🎞 Codec: {vc} / {ac}"},
     "summary_time": {"fa": "⌛ زمان پردازش: {mins}", "en": "⌛ Processing time: {mins}"},

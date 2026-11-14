@@ -281,3 +281,36 @@ def fmt_eta_range_fa(low: int, high: int) -> str:
     if fmt_duration_fa(low) == fmt_duration_fa(high):
         return "حدود " + fmt_duration_fa(high)
     return f"{fmt_duration_fa(low)} تا {fmt_duration_fa(high)}"
+
+
+def predict_guard(probe: dict, size_bytes: int, cfg) -> Decision | None:
+    """Deterministic predictive no-gain guard (V3 §16 — no ML, no history).
+
+    Returns a ``deliver_source`` Decision when the LOW edge of the predicted
+    EDU480 output reaches ``cfg.predict_no_gain_ratio`` of the source size —
+    i.e. when encoding is confidently useless. The guard can only SKIP
+    encodes the model is confident about; it never fires on unknown sizes
+    and never rejects a useful encode (cold-start safe by construction).
+    """
+    if not getattr(cfg, "encode_predict_guard", True):
+        return None
+    if not size_bytes:
+        return None  # unknown source size: never guess (V3 §16)
+    ratio = getattr(cfg, "predict_no_gain_ratio", 0.98)
+    from . import estimate as estimate_mod  # local import: estimate is leaf-level
+
+    predicted_low, predicted_high = estimate_mod.estimate_output_bytes(
+        probe.get("duration_s"),
+        estimate_mod.output_pixels(probe.get("width"), probe.get("height"), MAX_SHORT_SIDE),
+        "h264", getattr(cfg, "edu480_crf", 25),
+        audio_kbps=getattr(cfg, "edu480_audio_kbps", 64),
+        source_bytes=size_bytes,
+    )
+    if predicted_low > 0 and predicted_low >= size_bytes * ratio:
+        return Decision(
+            "deliver_source",
+            f"predictive no-gain (deterministic bpp guard v1): EDU480 output "
+            f"~{estimate_mod.format_size_range(predicted_low, predicted_high)} vs source "
+            f"{size_bytes} bytes (>= {ratio:.0%} of source)",
+        )
+    return None

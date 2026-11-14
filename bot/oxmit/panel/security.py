@@ -14,7 +14,10 @@ from typing import Any, Callable
 
 from aiohttp import web
 
-OWNER_TELEGRAM_ID = 829999317
+# Owner identity is configured exclusively via OWNER_TELEGRAM_ID in the
+# protected environment. No hardcoded identifier, no first-admin fallback:
+# when the variable is absent the owner-level panel API fails closed
+# (SEC: canonical identity, V3 §25).
 
 
 def _sign(token: str, data: str) -> str:
@@ -75,29 +78,25 @@ def get_session(request: web.Request) -> dict | None:
 
 
 def is_owner_session(session: dict | None, configured_owner_id: int | None = None) -> bool:
-    """Determine whether a session belongs to the verified bot owner."""
+    """Determine whether a session belongs to the verified bot owner.
+
+    Fail closed: without an explicitly configured Owner identity
+    (OWNER_TELEGRAM_ID) no session is ever treated as the owner. There is
+    no hardcoded identifier and no first-administrator fallback.
+    """
     if not session:
         return False
     if session.get("role") != "owner":
         return False
+    if not configured_owner_id:
+        return False
 
-    owner_id = configured_owner_id or OWNER_TELEGRAM_ID
     tg_id = session.get("tg_id")
     actor = str(session.get("actor") or "")
 
-    # Valid owner representations:
-    # 1. Matching OWNER_TELEGRAM_ID or configured owner ID
-    # 2. Master token login (actor == 'owner:token' or tg_id is None / 829999317)
-    # 3. Explicit actor string starting with owner ID
-    if tg_id is not None and tg_id not in (OWNER_TELEGRAM_ID, owner_id):
-        return False
-    if tg_id in (OWNER_TELEGRAM_ID, owner_id):
+    if tg_id == configured_owner_id:
         return True
-    if actor == "owner:token":
-        return True
-    if actor in (f"owner:{OWNER_TELEGRAM_ID}", f"owner:{owner_id}"):
-        return True
-    if tg_id is None and session.get("role") == "owner":
+    if actor == f"owner:{configured_owner_id}":
         return True
 
     return False
@@ -148,9 +147,9 @@ def require_owner(handler: Callable[..., Any]) -> Callable[..., Any]:
         if not session:
             return web.json_response({"error": "Unauthorized"}, status=401)
 
-        # 2. Authorization check
+        # 2. Authorization check (fail closed without configured Owner)
         cfg = getattr(request, "app", {}).get("cfg") if hasattr(request, "app") else None
-        configured_owner = getattr(cfg, "owner_telegram_id", None) or OWNER_TELEGRAM_ID
+        configured_owner = getattr(cfg, "owner_telegram_id", None)
         if not is_owner_session(session, configured_owner):
             return web.json_response(
                 {"error": "Forbidden: Owner access required"}, status=403

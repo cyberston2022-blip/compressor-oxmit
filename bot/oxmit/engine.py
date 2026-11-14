@@ -224,11 +224,10 @@ class JobEngine(QueueMixin):
         return sorted({r["tg_id"] for r in rows} | set(self.cfg.admin_ids))
 
     async def is_owner(self, tg_id: int) -> bool:
+        # Canonical identity: OWNER_TELEGRAM_ID only. No first-admin fallback
+        # (SEC: no privilege elevation via DB insertion order, V3 §25).
         owner = self.cfg.owner_telegram_id
-        if owner:
-            return tg_id == owner
-        admins = await self.admin_ids()
-        return bool(admins) and tg_id == admins[0]
+        return bool(owner) and tg_id == owner
 
     async def promote_admin(self, actor: str, tg_id: int) -> tuple[bool, str]:
         row = await self.db.fetchrow("SELECT tg_id FROM users WHERE tg_id = $1", tg_id)
@@ -405,6 +404,29 @@ class JobEngine(QueueMixin):
             # bot token. A sanitized hint is enough for operators.
             log.warning("local bot api file not readable", extra={"detail": "permission denied"})
             return None
+
+    def _make_botapi_readable(self, source: Path) -> None:
+        """Make a Local Bot API download readable by the worker UID.
+
+        The bot-api server creates its data directories with mode 0750 and
+        downloaded files with 0600 regardless of umask. With
+        WORKERS_READ_BOTAPI=true the Encore worker (uid 1000) reads the file
+        through its read-only volume mount, so traversal and read bits must
+        be granted here. The bot runs as root, so this is safe and cheap
+        (a few chmods instead of a multi-GB staging copy).
+        """
+        target = Path(source)
+        if not target.is_relative_to(Path(self.cfg.botapi_dir)):
+            return  # nothing under the bot-api tree: nothing to grant
+        try:
+            for d in (target.parent, target.parent.parent):
+                if d.is_dir():
+                    os.chmod(d, 0o777)
+            os.chmod(target, 0o644)
+        except OSError as exc:
+            # Never fatal: _stage_source falls back to hardlink/copy.
+            log.warning("botapi readability chmod failed, worker may fall back",
+                        extra={"detail": media_mod.redact(str(exc))[:120]})
 
     def _disk_free(self) -> int:
         try:
@@ -988,7 +1010,9 @@ class JobEngine(QueueMixin):
             profile_key=profile_key, sha=sha, size_bytes=size_bytes,
             reuse_kind=reuse_kind,
         )
-        if result.get("delivered"):
+        if result.get("outcome") == "reused":
+            # The user explicitly accepted the cached version; delivery runs
+            # in a background task, so acceptance is counted here.
             await self.db.bump("cache_accepted")
         return result
 
@@ -997,44 +1021,20 @@ class JobEngine(QueueMixin):
     # ------------------------------------------------------------------
     async def _reuse_archive(self, reusable_parts, *, tg_id, chat_id, status_msg_id,
                              profile_key, sha, size_bytes, reuse_kind: str = "exact") -> dict:
+        """Record an archive reuse; hand the Telegram delivery to a task.
+
+        UX (P1, multi-file intake): the Telegram send happens in a spawned
+        task so the naming loop NEVER waits on a potentially minutes-long
+        archive copy (delivering a 2GB result must not freeze the next
+        naming prompt). DB bookkeeping stays synchronous so counters and
+        rows are consistent before the caller continues. The spawned task
+        writes the deliveries row itself (it learns the message id only
+        after the send).
+        """
         reusable = reusable_parts[0]
         archive_id = reusable["id"]
         source_size = reusable["source_size"] or size_bytes
         output_size = sum((r["output_size"] or 0) for r in reusable_parts)
-        lang = await self._lang(tg_id)
-        pref = await self._user_pref(tg_id)
-
-        ok, method, delivered_msg = False, "none", None
-        if chat_id is not None:
-            try:
-                if len(reusable_parts) > 1:
-                    ids = [r["id"] for r in reusable_parts]
-                    all_ok, delivered = await self._deliver_parts(
-                        chat_id, ids, lang, len(reusable_parts)
-                    )
-                    ok, method, delivered_msg = all_ok, "parts", delivered
-                else:
-                    ok, method, delivered_msg = await self._deliver_archive_to(
-                        chat_id, reusable, pref,
-                        caption=tr("status_reused", lang),
-                    )
-            except TelegramAPIError as exc:
-                log.warning("reuse delivery error", extra={"detail": str(exc)[:200]})
-
-        if reusable["message_id"] and ok and method in ("file_id", "upload"):
-            await self.db.execute(
-                "UPDATE archive_records SET status = 'missing' "
-                "WHERE id = $1 AND status = 'active'",
-                archive_id,
-            )
-            await self.db.bump("archive_missing_detected")
-            log.warning("archive message missing on reuse", extra={"detail": str(archive_id)})
-
-        await self.db.execute(
-            "UPDATE archive_records SET reuse_count = reuse_count + 1, "
-            "last_reused_at = now() WHERE id = $1",
-            archive_id,
-        )
 
         job_id = await self.db.fetchval(
             """
@@ -1051,29 +1051,13 @@ class JobEngine(QueueMixin):
             """,
             tg_id, archive_id, profile_key, source_size, output_size, status_msg_id,
         )
-        if chat_id is not None and pref.get("notify_done", True):
-            await self.db.execute(
-                """
-                INSERT INTO deliveries(archive_id, job_id, tg_id, chat_id, message_id,
-                                       method, status, error)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-                """,
-                archive_id, job_id, tg_id, chat_id, delivered_msg, method,
-                "ok" if ok else "failed", None if ok else "all delivery methods failed",
-            )
-            await self.db.bump("deliveries_ok" if ok else "deliveries_failed")
-            if ok:
-                await self.edit_status_sync(chat_id, status_msg_id,
-                                            tr("status_done", lang))
-            else:
-                try:
-                    await self.bot.edit_message_text(
-                        chat_id=chat_id, message_id=status_msg_id,
-                        text=tr("status_delivery_failed", lang),
-                        reply_markup=redeliver_markup(str(job_id)),
-                    )
-                except TelegramAPIError:
-                    pass
+
+        await self.db.execute(
+            "UPDATE archive_records SET reuse_count = reuse_count + 1, "
+            "last_reused_at = now() WHERE id = $1",
+            archive_id,
+        )
+
         await self.db.bump({
             "exact": "dedup_exact_reuse",
             "fuzzy": "dedup_fuzzy_reuse",
@@ -1082,11 +1066,72 @@ class JobEngine(QueueMixin):
         if output_size and source_size > output_size:
             await self.db.bump("bytes_saved", source_size - output_size)
         log.info(
-            "archive reused",
+            "archive reused (delivery scheduled)",
             extra={"job_id": str(job_id), "profile": profile_key,
-                   "detail": f"method={method} reuse_kind={reuse_kind}"},
+                   "detail": f"reuse_kind={reuse_kind} parts={len(reusable_parts)}"},
         )
-        return {"outcome": "reused", "job_id": str(job_id), "delivered": ok}
+
+        if chat_id is not None:
+            self.spawn(self._deliver_reuse(
+                chat_id=chat_id, tg_id=tg_id, status_msg_id=status_msg_id,
+                archive_id=archive_id, job_id=str(job_id),
+                reusable_parts=reusable_parts, lang=await self._lang(tg_id)))
+
+        return {"outcome": "reused", "job_id": str(job_id), "delivered": False}
+
+    async def _deliver_reuse(self, *, chat_id, tg_id, status_msg_id, archive_id,
+                             job_id: str, reusable_parts, lang: str) -> None:
+        """Background delivery of a reused archive result (spawned task)."""
+        pref = await self._user_pref(tg_id)
+        ok, method, delivered_msg = False, "none", None
+        try:
+            if len(reusable_parts) > 1:
+                ids = [r["id"] for r in reusable_parts]
+                all_ok, delivered = await self._deliver_parts(
+                    chat_id, ids, lang, len(reusable_parts)
+                )
+                ok, method, delivered_msg = all_ok, "parts", delivered
+            else:
+                ok, method, delivered_msg = await self._deliver_archive_to(
+                    chat_id, reusable_parts[0], pref,
+                    caption=tr("status_reused", lang),
+                )
+        except TelegramAPIError as exc:
+            log.warning("reuse delivery error", extra={"detail": str(exc)[:200]})
+
+        if reusable_parts[0]["message_id"] and ok and method in ("file_id", "upload"):
+            await self.db.execute(
+                "UPDATE archive_records SET status = 'missing' "
+                "WHERE id = $1 AND status = 'active'",
+                reusable_parts[0]["id"],
+            )
+            await self.db.bump("archive_missing_detected")
+            log.warning("archive message missing on reuse",
+                        extra={"detail": str(archive_id)})
+
+        await self.db.execute(
+            """
+            INSERT INTO deliveries(archive_id, job_id, tg_id, chat_id, message_id,
+                                   method, status, error)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            """,
+            archive_id, _as_uuid(job_id), tg_id, chat_id, delivered_msg, method,
+            "ok" if ok else "failed", None if ok else "all delivery methods failed",
+        )
+        await self.db.bump("deliveries_ok" if ok else "deliveries_failed")
+        if chat_id is not None and pref.get("notify_done", True):
+            if ok:
+                await self.edit_status_sync(chat_id, status_msg_id,
+                                            tr("status_done", lang))
+            elif status_msg_id:
+                try:
+                    await self.bot.edit_message_text(
+                        chat_id=chat_id, message_id=status_msg_id,
+                        text=tr("status_delivery_failed", lang),
+                        reply_markup=redeliver_markup(job_id),
+                    )
+                except TelegramAPIError:
+                    pass
 
     # ------------------------------------------------------------------
     # encode path
@@ -1112,6 +1157,7 @@ class JobEngine(QueueMixin):
         staged.parent.mkdir(parents=True, exist_ok=True)
         if self.cfg.workers_read_botapi:
             try:
+                self._make_botapi_readable(source)
                 if staged.is_symlink() or staged.exists():
                     staged.unlink()
                 staged.symlink_to(source)
@@ -2298,14 +2344,19 @@ class JobEngine(QueueMixin):
             saved_line = tr("summary_saved_neg", lang,
                             delta=media_mod.human_size(abs(saved)))
         res = f"{probe.get('width') or '?'}x{probe.get('height') or '?'}"
-        dur = _fmt_clock(probe.get("duration_s") or 0)
+        # Unknown duration must never render as 00:00:00 (F-DUR): a missing
+        # value means "not extracted / unknown", not zero.
+        if probe.get("duration_s"):
+            dur_line = tr("summary_duration", lang, dur=_fmt_clock(probe["duration_s"]))
+        else:
+            dur_line = tr("summary_duration_unknown", lang)
         lines = [
             tr("summary_header", lang),
             tr("summary_file", lang, name=media_mod.sanitize_filename(filename, 40)),
             tr("summary_size", lang, src=media_mod.human_size(source_size),
                out=media_mod.human_size(output_size)),
             saved_line,
-            tr("summary_duration", lang, dur=dur),
+            dur_line,
             tr("summary_res", lang, res=res),
             tr("summary_codec", lang,
                vc=(probe.get("vcodec") or "?").upper(),
@@ -2470,7 +2521,21 @@ class JobEngine(QueueMixin):
         started = row["started_at"]
         completed = row["completed_at"] or _utcnow()
         filename = await self._media_filename(row)
-        out_probe = out_probe or {}
+        out_probe = dict(out_probe or {})
+        if not out_probe.get("duration_s") and output_media_id:
+            # Reuse paths may not carry the output probe inline; the stored
+            # media asset is the verified source for duration/dims (F-DUR:
+            # unknown duration must surface as unknown, never 00:00:00).
+            op = await self.db.fetchrow(
+                "SELECT probe, width, height, duration_s, vcodec, acodec FROM media_assets WHERE id = $1",
+                output_media_id)
+            if op:
+                merged = dict(op.get("probe") or {})
+                for k, v in (("width", op["width"]), ("height", op["height"]),
+                             ("duration_s", op["duration_s"]),
+                             ("vcodec", op["vcodec"]), ("acodec", op["acodec"])):
+                    merged.setdefault(k, v)
+                out_probe = {**merged, **{k: v for k, v in out_probe.items() if v}}
         if no_gain and src_asset:
             effective_probe = dict(src_asset.get("probe") or {})
             if not effective_probe:

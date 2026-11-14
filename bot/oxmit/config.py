@@ -165,6 +165,13 @@ class Settings:
     edu480_preset: str = "veryfast"
     edu480_max_fps: float = 30.0
     edu480_audio_kbps: int = 64
+    # Predictive no-gain guard (deterministic bpp model, V3 §16): when the
+    # low edge of the predicted EDU480 output reaches this fraction of the
+    # source, the pipeline delivers the source instead of encoding. It is a
+    # GUARD only — it can only skip encodes that the model is confident are
+    # useless, never reject useful ones (cold-start safe).
+    encode_predict_guard: bool = True
+    predict_no_gain_ratio: float = 0.98
     # Sources already <=480p, H.264 + AAC, <= this video bitrate and <= the
     # fps cap are compliant: they are remuxed (stream copy), not re-encoded.
     edu480_compliant_kbps: int = 700
@@ -281,6 +288,8 @@ class Settings:
             errs.append(f"ENCODE_SLOTS={self.encode_slots} outside 0..32")
         if not 18 <= self.edu480_crf <= 35:
             errs.append(f"EDU480_CRF={self.edu480_crf} outside 18..35")
+        if not 0.5 <= self.predict_no_gain_ratio <= 1.2:
+            errs.append(f"PREDICT_NO_GAIN_RATIO={self.predict_no_gain_ratio} outside 0.5..1.2")
         if self.edu480_preset not in ("ultrafast", "superfast", "veryfast", "faster",
                                       "fast", "medium"):
             errs.append(f"EDU480_PRESET={self.edu480_preset} is not an x264 preset")
@@ -426,6 +435,8 @@ def load_settings() -> Settings:
     s.edu480_max_fps = _float("EDU480_MAX_FPS", 30.0)
     s.edu480_audio_kbps = _int("EDU480_AUDIO_KBPS", 64)
     s.edu480_compliant_kbps = _int("EDU480_COMPLIANT_KBPS", 700)
+    s.encode_predict_guard = _bool("ENCODE_PREDICT_GUARD", True)
+    s.predict_no_gain_ratio = _float("PREDICT_NO_GAIN_RATIO", 0.98)
 
     errs = s.validate()
     if os.getenv("OXMIT_SKIP_VALIDATION", "") != "1" and errs:

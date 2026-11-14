@@ -21,7 +21,7 @@ from . import edu480
 from . import media as media_mod
 from .jobqueue import SLOT_STAGES
 from .log import get_logger
-from .panel.security import require_owner, OWNER_TELEGRAM_ID
+from .panel.security import require_owner
 
 log = get_logger("oxmit.dashboard")
 
@@ -406,7 +406,7 @@ def setup(app: web.Application, engine, db, cfg, state, *, session_of, post_sess
 
     async def moderate(request: web.Request, session: dict):
         jid = request.match_info["job_id"]
-        actor = session.get("tg_id") or cfg.owner_telegram_id or OWNER_TELEGRAM_ID
+        actor = session.get("tg_id") or cfg.owner_telegram_id
         res = await engine.moderate_job(jid, actor)
         await audit_mod.log_action(db, session.get("actor", "owner"), "owner",
                                    "moderation.remove_ban", jid, str(res), "web",

@@ -15,7 +15,6 @@ from typing import Any
 from .. import audit as audit_mod
 from .. import permissions
 from ..log import get_logger
-from .security import OWNER_TELEGRAM_ID
 
 log = get_logger("oxmit.panel.bot")
 
@@ -129,8 +128,8 @@ async def ban_bot_user(
     client_ip: str = "?",
 ) -> dict[str, Any]:
     """Ban or unban a user with cache invalidation and active job cancellation."""
-    owner_id = getattr(cfg, "owner_telegram_id", None) or OWNER_TELEGRAM_ID
-    if tg_id in (OWNER_TELEGRAM_ID, owner_id):
+    owner_id = getattr(cfg, "owner_telegram_id", None)
+    if owner_id and tg_id == owner_id:
         raise PermissionError("Cannot ban the bot owner")
 
     if ban is None:
@@ -302,17 +301,26 @@ class BroadcastManager:
         return False
 
 
+# SEC: the panel config API exposes only operational toggles. Everything
+# else (archive_channel_id, limits, audit keys, ...) stays DB-authoritative
+# and is never echoed to the browser; arbitrary key writes are rejected.
+CONFIG_READ_KEYS = ("access_mode", "paused", "global_thumb_path")
+CONFIG_WRITE_KEYS = ("paused", "access_mode", "global_thumb_path")
+
+
 async def get_bot_config(db: Any, state: Any) -> dict[str, Any]:
-    """Retrieve runtime configuration toggles."""
+    """Retrieve the allowlisted runtime configuration toggles."""
     config: dict[str, Any] = {
         "access_mode": str(getattr(state, "access_mode", "private")).strip('"'),
-        "paused": getattr(state, "paused", False),
-        "global_thumb": getattr(state, "global_thumb", None) is not None,
+        "paused": bool(getattr(state, "paused", False)),
         "global_thumb_path": getattr(state, "global_thumb", None),
+        "global_thumb": getattr(state, "global_thumb", None) is not None,
     }
     try:
         rows = await db.fetch("SELECT key, value FROM app_config")
         for r in rows:
+            if r["key"] not in CONFIG_READ_KEYS:
+                continue
             val = r["value"]
             if isinstance(val, str):
                 try:
@@ -324,7 +332,7 @@ async def get_bot_config(db: Any, state: Any) -> dict[str, Any]:
             config[r["key"]] = val
     except Exception:
         pass
-    if "access_mode" in config and isinstance(config["access_mode"], str):
+    if isinstance(config.get("access_mode"), str):
         config["access_mode"] = config["access_mode"].strip('"')
     return config
 
@@ -336,7 +344,7 @@ async def update_bot_config(
     actor: str = "owner",
     client_ip: str = "?",
 ) -> dict[str, Any]:
-    """Persist dynamic configuration adjustments in app_config and memory."""
+    """Persist allowlisted dynamic configuration adjustments."""
     if not isinstance(payload, dict):
         return {"status": "error", "error": "payload must be a dictionary"}
 
@@ -347,6 +355,13 @@ async def update_bot_config(
         items = list(payload["settings"].items())
     else:
         items = [(k, v) for k, v in payload.items() if k not in ("csrf", "token")]
+
+    # SEC: reject keys outside the allowlist instead of writing arbitrary
+    # app_config rows from the browser.
+    rejected = [k for k, _v in items if k not in CONFIG_WRITE_KEYS]
+    if rejected:
+        return {"status": "error",
+                "error": f"configuration keys not allowed: {', '.join(sorted(rejected))}"}
 
     for k, v in items:
         await db.set_config(k, v)

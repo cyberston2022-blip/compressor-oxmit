@@ -44,10 +44,8 @@ def contact_button(lang: str = "fa") -> InlineKeyboardButton:
 
 
 async def owner_id(engine, cfg) -> int | None:
-    if cfg.owner_telegram_id:
-        return cfg.owner_telegram_id
-    admins = await engine.admin_ids()
-    return admins[0] if admins else None
+    # Canonical owner identity only — no first-admin fallback (SEC).
+    return cfg.owner_telegram_id or None
 
 
 def build_router(engine, db, cfg, state) -> Router:

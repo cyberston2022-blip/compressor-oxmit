@@ -171,11 +171,14 @@ async def test_deliver_cached_offer_accepts_and_bumps(engine, fake_db):
         sha=SHA, profile_key="r480", profile_version=1, reuse_kind="exact",
         tg_id=7, chat_id=None, status_msg_id=None, size_bytes=3 * 1024**3,
     )
-    # chat_id=None skips delivery (ok=False), but the reuse bookkeeping runs:
+    # chat_id=None skips the background delivery entirely; the reuse
+    # bookkeeping (job row, reuse_count, dedup counter) still runs sync:
     assert result["outcome"] == "reused"
     assert result["delivered"] is False
-    assert not any(e[1] == "cache_accepted" for e in fake_db.bumps()), \
-        "cache_accepted must only count successful deliveries"
+    # The user explicitly accepted the offer, so acceptance is counted even
+    # though the delivery itself is scheduled (2026-11-14 stabilization):
+    assert any(e[1] == "cache_accepted" for e in fake_db.bumps()), \
+        "explicit acceptance must count cache_accepted"
     assert any("reuse_count = reuse_count + 1" in e[1] for e in fake_db.executed)
     assert any(e[1] == "dedup_exact_reuse" for e in fake_db.bumps())
 

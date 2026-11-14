@@ -47,10 +47,14 @@ def build_caption(
     height = probe.get("height") or "?"
     vcodec = (probe.get("vcodec") or "?").upper()
     acodec = (probe.get("acodec") or "?").upper()
-    duration = probe.get("duration_s") or 0
-    mins, secs = divmod(int(duration), 60)
-    hours, mins = divmod(mins, 60)
-    dur_text = f"{hours}:{mins:02d}:{secs:02d}" if hours else f"{mins}:{secs:02d}"
+    # Unknown duration must not render as 0:00 (F-DUR).
+    duration = probe.get("duration_s")
+    if duration:
+        mins, secs = divmod(int(duration), 60)
+        hours, mins = divmod(mins, 60)
+        dur_text = f"{hours}:{mins:02d}:{secs:02d}" if hours else f"{mins}:{secs:02d}"
+    else:
+        dur_text = "نامشخص"
     return (
         f"🎬 {media_mod.sanitize_filename(filename, 40)}\n"
         f"⚙️ {profile_title} | {width}×{height} | {vcodec}/{acodec}\n"

@@ -34,7 +34,6 @@ from . import media as media_mod
 from . import dashboard_page
 from .log import get_logger
 from .panel.security import (
-    OWNER_TELEGRAM_ID,
     _sign,
     _check_cookie,
     is_owner_session,
@@ -56,18 +55,10 @@ from .panel.queue_manager import (
     get_compression_presets,
     get_worker_telemetry,
 )
-from .panel.superadmin import (
-    run_terminal_command,
-    execute_sql,
-    list_db_tables,
-    trigger_db_backup,
-    list_directory,
-    delete_file,
-    read_env_file,
-    save_env_file,
-    get_ffmpeg_params,
-    update_ffmpeg_params,
-)
+# SEC (V3 §25): the Milestone-2 super-admin endpoints (arbitrary shell,
+# arbitrary SQL, raw .env editor, file deletion, in-memory FFmpeg
+# customizer) were removed. The panel exposes only allowlisted operational
+# actions; see dashboard_page for the surviving navigation.
 
 log = get_logger("oxmit.webpanel")
 
@@ -507,7 +498,7 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         sid = secrets.token_urlsafe(24)
         csrf = secrets.token_urlsafe(24)
         exp = int(time.time()) + COOKIE_TTL_S
-        owner_id = cfg.owner_telegram_id or OWNER_TELEGRAM_ID
+        owner_id = cfg.owner_telegram_id
         # The panel token is the server operator's secret -> owner role.
         sessions[sid] = {"exp": exp, "csrf": csrf,
                          "actor": f"owner:{owner_id}",
@@ -550,7 +541,7 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         # One-time links carry the minting admin's identity: the session
         # gets that person's real role (owner/admin), not a shared login.
         minted = int(entry["minted_by"])
-        role = "owner" if (minted in (OWNER_TELEGRAM_ID, cfg.owner_telegram_id) or await engine.is_owner(minted)) else "admin"
+        role = "owner" if await engine.is_owner(minted) else "admin"
         sessions[sid] = {"exp": exp, "csrf": csrf, "actor": f"{role}:{minted}",
                          "role": role, "tg_id": minted,
                          "authenticated": True,
@@ -772,7 +763,7 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         except (TypeError, ValueError):
             return _json({"error": "bad id"}, 400)
         if action in ("ban", "vip"):
-            if action == "ban" and tg_id in (OWNER_TELEGRAM_ID, cfg.owner_telegram_id):
+            if action == "ban" and cfg.owner_telegram_id and tg_id == cfg.owner_telegram_id:
                 return _json({"error": "Forbidden: Cannot ban the bot owner"}, 403)
             column = "is_blocked" if action == "ban" else "is_vip"
             new = await db.fetchval(
@@ -938,7 +929,7 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         session = _session(request)
         if not session:
             return _json({"error": "unauthorized"}, 401)
-        configured_owner = getattr(cfg, "owner_telegram_id", None) or OWNER_TELEGRAM_ID
+        configured_owner = getattr(cfg, "owner_telegram_id", None)
         if not is_owner_session(session, configured_owner):
             return _json({"error": "Forbidden: Owner access required"}, 403)
         ws = web.WebSocketResponse(heartbeat=25.0)
@@ -1264,127 +1255,6 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
         return web.Response(text=_DASHBOARD_PAGE, content_type="text/html", charset="utf-8")
 
     app.router.add_get("/panel/legacy", legacy_page)
-
-    # ------------------------------------------------------------------ #
-    #  Milestone 2 — Super-Admin Owner-Exclusive Endpoints                #
-    # ------------------------------------------------------------------ #
-
-    @require_owner
-    async def api_terminal(request: web.Request) -> web.Response:
-        """POST /panel/api/super/terminal — execute shell/docker command."""
-        try:
-            body = await request.json()
-        except Exception:
-            return _json({"error": "Invalid JSON"}, 400)
-        cmd = str(body.get("cmd", "")).strip()
-        if not cmd:
-            return _json({"error": "cmd is required"}, 400)
-        timeout = min(float(body.get("timeout", 30)), 120)
-        result = await run_terminal_command(cmd, timeout=timeout)
-        return _json(result)
-
-    @require_owner
-    async def api_sql_query(request: web.Request) -> web.Response:
-        """POST /panel/api/super/db/query — execute SQL query."""
-        try:
-            body = await request.json()
-        except Exception:
-            return _json({"error": "Invalid JSON"}, 400)
-        query = str(body.get("query", "")).strip()
-        if not query:
-            return _json({"error": "query is required"}, 400)
-        db_url = getattr(cfg, "pg_dsn", "") or os.environ.get("PG_DSN", "") or getattr(cfg, "database_url", "") or os.environ.get("DATABASE_URL", "")
-        if not db_url:
-            return _json({"error": "DATABASE_URL or PG_DSN not configured"}, 500)
-        result = await execute_sql(db_url, query)
-        return _json(result)
-
-    @require_owner
-    async def api_sql_tables(request: web.Request) -> web.Response:
-        """GET /panel/api/super/db/tables — list PostgreSQL tables."""
-        db_url = getattr(cfg, "pg_dsn", "") or os.environ.get("PG_DSN", "") or getattr(cfg, "database_url", "") or os.environ.get("DATABASE_URL", "")
-        if not db_url:
-            return _json({"error": "DATABASE_URL or PG_DSN not configured"}, 500)
-        result = await list_db_tables(db_url)
-        return _json(result)
-
-    @require_owner
-    async def api_db_backup(request: web.Request) -> web.Response:
-        """POST /panel/api/super/db/backup — trigger pg_dump backup."""
-        db_url = getattr(cfg, "pg_dsn", "") or os.environ.get("PG_DSN", "") or getattr(cfg, "database_url", "") or os.environ.get("DATABASE_URL", "")
-        if not db_url:
-            return _json({"error": "DATABASE_URL or PG_DSN not configured"}, 500)
-        result = await trigger_db_backup(db_url, backup_dir="/tmp")
-        return _json(result)
-
-    @require_owner
-    async def api_files_list(request: web.Request) -> web.Response:
-        """GET /panel/api/super/files — list files in allowed paths."""
-        path = request.rel_url.query.get("path", "/media")
-        result = list_directory(path)
-        return _json(result)
-
-    @require_owner
-    async def api_files_delete(request: web.Request) -> web.Response:
-        """POST /panel/api/super/files/delete — delete a file."""
-        try:
-            body = await request.json()
-        except Exception:
-            return _json({"error": "Invalid JSON"}, 400)
-        path = str(body.get("path", "")).strip()
-        if not path:
-            return _json({"error": "path is required"}, 400)
-        result = delete_file(path)
-        return _json(result)
-
-    @require_owner
-    async def api_env_read(request: web.Request) -> web.Response:
-        """GET /panel/api/super/env — read .env file."""
-        result = read_env_file()
-        return _json(result)
-
-    @require_owner
-    async def api_env_save(request: web.Request) -> web.Response:
-        """POST /panel/api/super/env — save .env variables."""
-        try:
-            body = await request.json()
-        except Exception:
-            return _json({"error": "Invalid JSON"}, 400)
-        vars_dict = body.get("vars", {})
-        if not isinstance(vars_dict, dict):
-            return _json({"error": "vars must be an object"}, 400)
-        result = save_env_file(vars_dict)
-        return _json(result)
-
-    @require_owner
-    async def api_ffmpeg_get(request: web.Request) -> web.Response:
-        """GET /panel/api/super/ffmpeg — get current FFmpeg parameters."""
-        return _json({"params": get_ffmpeg_params()})
-
-    @require_owner
-    async def api_ffmpeg_update(request: web.Request) -> web.Response:
-        """POST /panel/api/super/ffmpeg — update FFmpeg parameters."""
-        try:
-            body = await request.json()
-        except Exception:
-            return _json({"error": "Invalid JSON"}, 400)
-        updates = body.get("params", body)
-        if not isinstance(updates, dict):
-            return _json({"error": "params must be an object"}, 400)
-        result = update_ffmpeg_params(updates)
-        return _json(result)
-
-    # Register Super-Admin routes
-    app.router.add_post("/panel/api/super/terminal",    api_terminal)
-    app.router.add_post("/panel/api/super/db/query",    api_sql_query)
-    app.router.add_get( "/panel/api/super/db/tables",   api_sql_tables)
-    app.router.add_post("/panel/api/super/db/backup",   api_db_backup)
-    app.router.add_get( "/panel/api/super/files",       api_files_list)
-    app.router.add_post("/panel/api/super/files/delete",api_files_delete)
-    app.router.add_get( "/panel/api/super/env",         api_env_read)
-    app.router.add_post("/panel/api/super/env",         api_env_save)
-    app.router.add_get( "/panel/api/super/ffmpeg",      api_ffmpeg_get)
-    app.router.add_post("/panel/api/super/ffmpeg",      api_ffmpeg_update)
 
     dashboard_mod.setup(app, engine, db, cfg, state, session_of=_session,
                         post_session_of=_post_session, client_ip=_ip)
