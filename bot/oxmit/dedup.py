@@ -29,6 +29,9 @@ async def find_reusable_parts(
                ms.sha256 AS source_sha256,
                m2.size_bytes AS output_size,
                m2.tg_file_id AS output_tg_file_id,
+               m2.duration_s AS output_duration_s,
+               m2.width AS output_width,
+               m2.height AS output_height,
                ms.tg_file_id AS source_tg_file_id,
                ms.size_bytes AS source_size
         FROM archive_records ar

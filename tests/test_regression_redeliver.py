@@ -54,3 +54,40 @@ async def test_redeliver_no_gain_path_uses_job_fields(engine, fake_db):
     src_queries = [e for e in fake_db.executed
                    if e[0] == "fetchrow" and "media_assets WHERE id = $1" in e[1]]
     assert any(e[2] and str(e[2][0]) == "m-2" for e in src_queries)
+
+
+async def test_redeliver_passes_duration_and_dimensions_to_delivery(engine, fake_db, monkeypatch):
+    _allow_requester(fake_db)
+    from oxmit import archive as archive_mod
+    from unittest.mock import AsyncMock
+
+    mock_deliver = AsyncMock(return_value=(True, "file_id", 12345))
+    monkeypatch.setattr(archive_mod, "deliver_result", mock_deliver)
+
+    async def fetchrow(sql, *args):
+        fake_db.executed.append(("fetchrow", sql, args))
+        if "FROM jobs WHERE id" in sql:
+            return {
+                "id": JOB_2, "status": "completed", "reuse_of": None,
+                "output_media_id": None, "is_no_gain": True,
+                "media_id": "m-2", "source_path": None,
+            }
+        if "FROM media_assets WHERE id" in sql:
+            return {
+                "tg_file_id": "file-xyz",
+                "duration_s": 59.8,
+                "width": 1280,
+                "height": 720,
+            }
+        return None
+
+    fake_db.fetchrow = fetchrow
+    ok, method = await engine.redeliver(JOB_2, 111, 222)
+    assert ok is True
+    assert method == "file_id"
+    mock_deliver.assert_awaited_once()
+    kwargs = mock_deliver.await_args.kwargs
+    assert kwargs.get("duration") == 60
+    assert kwargs.get("width") == 1280
+    assert kwargs.get("height") == 720
+

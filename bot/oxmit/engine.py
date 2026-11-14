@@ -1099,9 +1099,14 @@ class JobEngine(QueueMixin):
                 )
                 ok, method, delivered_msg = all_ok, "parts", delivered
             else:
+                part0 = reusable_parts[0]
+                dur = max(1, int(round(part0["output_duration_s"]))) if part0.get("output_duration_s") else None
                 ok, method, delivered_msg = await self._deliver_archive_to(
-                    chat_id, reusable_parts[0], pref,
+                    chat_id, part0, pref,
                     caption=tr("status_reused", lang),
+                    duration=dur,
+                    width=part0.get("output_width"),
+                    height=part0.get("output_height"),
                 )
         except TelegramAPIError as exc:
             log.warning("reuse delivery error", extra={"detail": str(exc)[:200]})
@@ -2052,7 +2057,7 @@ class JobEngine(QueueMixin):
             "UPDATE jobs SET stage = 'uploading', upload_started_at = now() WHERE id = $1",
             row["id"])
         await self.push_stage_card(job_id)
-        dur_val = int(round(out_probe.get("duration_s") or 0)) if out_probe.get("duration_s") else None
+        dur_val = max(1, int(round(out_probe.get("duration_s") or 0))) if out_probe.get("duration_s") else None
         try:
             sent = await self._archive_upload(
                 path=output_path, caption=caption, thumbnail=thumbnail,
@@ -2282,7 +2287,7 @@ class JobEngine(QueueMixin):
             try:
                 p = await media_mod.probe_video(path)
                 if not duration and p.get("duration_s"):
-                    duration = int(round(p["duration_s"]))
+                    duration = max(1, int(round(p["duration_s"])))
                 if not width:
                     width = p.get("width")
                 if not height:
@@ -2617,7 +2622,7 @@ class JobEngine(QueueMixin):
                         tr("status_done_nogain", lang),
                     )
                 else:
-                    dur_val = int(round(effective_probe.get("duration_s") or 0)) if effective_probe.get("duration_s") else None
+                    dur_val = max(1, int(round(effective_probe.get("duration_s") or 0))) if effective_probe.get("duration_s") else None
                     ok, method, mid = await archive_mod.deliver_result(
                         self,
                         chat_id=r["chat_id"],
@@ -2667,7 +2672,7 @@ class JobEngine(QueueMixin):
                             if wm_done:
                                 await self.db.bump("watermark_jobs")
                                 ok, method, mid = False, "none", None
-                                dur_val = int(round(effective_probe.get("duration_s") or 0)) if effective_probe.get("duration_s") else None
+                                dur_val = max(1, int(round(effective_probe.get("duration_s") or 0))) if effective_probe.get("duration_s") else None
                                 try:
                                     msg = await self.bot.send_video(
                                         chat_id=r["chat_id"],
@@ -2701,7 +2706,7 @@ class JobEngine(QueueMixin):
                             except TelegramAPIError as exc:
                                 log.info("doc delivery failed, falling back",
                                          extra={"detail": str(exc)[:150]})
-                            dur_val = int(round(effective_probe.get("duration_s") or 0)) if effective_probe.get("duration_s") else None
+                            dur_val = max(1, int(round(effective_probe.get("duration_s") or 0))) if effective_probe.get("duration_s") else None
                             if not ok:
                                 ok, method, mid = await self._deliver_archive_to(
                                     r["chat_id"], archive_row, pref,
@@ -2710,7 +2715,7 @@ class JobEngine(QueueMixin):
                                     width=effective_probe.get("width"),
                                     height=effective_probe.get("height"))
                         else:
-                            dur_val = int(round(effective_probe.get("duration_s") or 0)) if effective_probe.get("duration_s") else None
+                            dur_val = max(1, int(round(effective_probe.get("duration_s") or 0))) if effective_probe.get("duration_s") else None
                             ok, method, mid = await self._deliver_archive_to(
                                 r["chat_id"], archive_row, pref,
                                 caption=caption, thumbnail=thumb_file,
@@ -2833,12 +2838,13 @@ class JobEngine(QueueMixin):
                 job["output_media_id"],
             )
         out_asset = await self.db.fetchrow(
-            "SELECT tg_file_id FROM media_assets WHERE id = $1", job["output_media_id"]
+            "SELECT tg_file_id, duration_s, width, height FROM media_assets WHERE id = $1", job["output_media_id"]
         ) if job["output_media_id"] else None
         src_asset = await self.db.fetchrow(
-            "SELECT tg_file_id FROM media_assets WHERE id = $1", job["media_id"]
+            "SELECT tg_file_id, duration_s, width, height FROM media_assets WHERE id = $1", job["media_id"]
         )
         if job["is_no_gain"]:
+            dur_val = max(1, int(round(src_asset["duration_s"]))) if src_asset and src_asset.get("duration_s") else None
             ok, method, mid = await archive_mod.deliver_result(
                 self,
                 chat_id=chat_id,
@@ -2846,14 +2852,25 @@ class JobEngine(QueueMixin):
                 file_path=job["source_path"],
                 as_document=pref.get("delivery_style") == "doc",
                 thumbnail=self._global_thumb(),
+                duration=dur_val,
+                width=src_asset.get("width") if src_asset else None,
+                height=src_asset.get("height") if src_asset else None,
             )
         else:
-            ok, method, mid = await self._deliver_archive_to(chat_id, archive_row, pref)
+            eff_asset = out_asset or src_asset
+            dur_val = max(1, int(round(eff_asset["duration_s"]))) if eff_asset and eff_asset.get("duration_s") else None
+            eff_w = eff_asset.get("width") if eff_asset else None
+            eff_h = eff_asset.get("height") if eff_asset else None
+            ok, method, mid = await self._deliver_archive_to(
+                chat_id, archive_row, pref,
+                duration=dur_val, width=eff_w, height=eff_h,
+            )
             if not ok and out_asset and out_asset["tg_file_id"]:
                 ok, method, mid = await archive_mod.deliver_result(
                     self, chat_id=chat_id,
                     file_id=out_asset["tg_file_id"],
                     as_document=pref.get("delivery_style") == "doc",
+                    duration=dur_val, width=eff_w, height=eff_h,
                 )
         uncertain = method == "sent_unknown"
         await self.db.execute(

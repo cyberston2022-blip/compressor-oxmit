@@ -129,3 +129,55 @@ async def test_deliver_result_passes_duration_and_dimensions():
     assert kwargs.get("width") == 854
     assert kwargs.get("height") == 480
 
+
+@pytest.mark.asyncio
+async def test_deliver_result_probes_file_path_before_file_id(monkeypatch):
+    engine = MagicMock()
+    msg = MagicMock()
+    msg.message_id = 889
+    engine.bot.send_video = AsyncMock(return_value=msg)
+
+    probe_mock = AsyncMock(return_value={"duration_s": 42.4, "width": 1280, "height": 720})
+    from oxmit import media as media_mod
+    monkeypatch.setattr(media_mod, "probe_video", probe_mock)
+
+    ok, method, mid = await deliver_result(
+        engine,
+        chat_id=123,
+        file_id="tg-file-123",
+        file_path="/path/to/video.mp4",
+    )
+    assert ok is True
+    assert method == "file_id"
+    probe_mock.assert_awaited_once_with("/path/to/video.mp4")
+    kwargs = engine.bot.send_video.await_args.kwargs
+    assert kwargs.get("duration") == 42
+    assert kwargs.get("width") == 1280
+    assert kwargs.get("height") == 720
+
+
+@pytest.mark.asyncio
+async def test_deliver_result_sub_second_duration_rounds_to_one(monkeypatch):
+    engine = MagicMock()
+    msg = MagicMock()
+    msg.message_id = 890
+    engine.bot.send_video = AsyncMock(return_value=msg)
+
+    probe_mock = AsyncMock(return_value={"duration_s": 0.4, "width": 640, "height": 480})
+    from oxmit import media as media_mod
+    monkeypatch.setattr(media_mod, "probe_video", probe_mock)
+
+    ok, method, mid = await deliver_result(
+        engine,
+        chat_id=123,
+        file_path="/path/to/subsecond.mp4",
+    )
+    assert ok is True
+    assert method == "upload"
+    kwargs = engine.bot.send_video.await_args.kwargs
+    # Sub-second duration must round to 1s rather than 0s to avoid 00:00 display
+    assert kwargs.get("duration") == 1
+    assert kwargs.get("width") == 640
+    assert kwargs.get("height") == 480
+
+

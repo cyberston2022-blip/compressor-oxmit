@@ -123,6 +123,17 @@ async def deliver_result(
             else:
                 log.info("copy failed, trying file_id/local",
                          extra={"detail": str(exc)[:150]})
+    if not as_document and (not duration or not width or not height) and file_path:
+        try:
+            p = await media_mod.probe_video(file_path)
+            if not duration and p.get("duration_s"):
+                duration = max(1, int(round(p["duration_s"])))
+            if not width:
+                width = p.get("width")
+            if not height:
+                height = p.get("height")
+        except Exception:
+            pass
     if file_id:
         try:
             if as_document:
@@ -148,17 +159,6 @@ async def deliver_result(
             log.info("file_id send failed", extra={"detail": str(exc)[:150]})
     if file_path:
         try:
-            if not as_document and (not duration or not width or not height):
-                try:
-                    p = await media_mod.probe_video(file_path)
-                    if not duration and p.get("duration_s"):
-                        duration = int(round(p["duration_s"]))
-                    if not width:
-                        width = p.get("width")
-                    if not height:
-                        height = p.get("height")
-                except Exception:
-                    pass
             if as_document:
                 msg = await flood_safe(lambda: bot.send_document(
                     chat_id=chat_id, document=FSInputFile(file_path), caption=caption,
