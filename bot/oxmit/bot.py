@@ -218,7 +218,7 @@ async def main() -> None:
 
 
 from aiogram import BaseMiddleware
-from aiogram.types import TelegramObject, CallbackQuery, Message
+from aiogram.types import TelegramObject
 
 class OwnerOnlyMiddleware(BaseMiddleware):
     def __init__(self, cfg, state) -> None:
@@ -226,8 +226,11 @@ class OwnerOnlyMiddleware(BaseMiddleware):
         self.state = state
 
     async def __call__(self, handler, event: TelegramObject, data: dict):
-        is_private = getattr(self.state, "access_mode", "") == "private" or getattr(self.state, "owner_only", False) or getattr(self.cfg, "owner_only", False)
-        if not is_private:
+        # state.access_mode is the SINGLE runtime authority (DB-backed; set by
+        # the panel / admin panel). OWNER_ONLY in .env only seeds the first
+        # boot default in main() — OR-ing it here made an explicit public
+        # mode silently owner-only again (production bug, 2026-11-14).
+        if getattr(self.state, "access_mode", "") != "private":
             return await handler(event, data)
         user = getattr(event, "from_user", None)
         if user is None:
@@ -235,9 +238,11 @@ class OwnerOnlyMiddleware(BaseMiddleware):
         owner_id = self.cfg.owner_telegram_id
         is_owner_or_admin = (owner_id and user.id == owner_id) or (user.id in getattr(self.cfg, "admin_ids", []))
         if not is_owner_or_admin:
-            if isinstance(event, Message):
-                await event.answer("🔒 ربات در حال حاضر در حالت خصوصی قرار دارد و تنها برای مدیران مجاز و مالک ربات (@Oxmit) در دسترس است.")
-            elif isinstance(event, CallbackQuery):
+            # duck-typed event kind (matches the SimpleNamespace-stub tests):
+            # callback queries carry .data, messages do not
+            if hasattr(event, "data"):
                 await event.answer("🔒 ربات در حال حاضر در حالت خصوصی قرار دارد.", show_alert=True)
+            else:
+                await event.answer("🔒 ربات در حال حاضر در حالت خصوصی قرار دارد و تنها برای مدیران مجاز و مالک ربات (@Oxmit) در دسترس است.")
             return
         return await handler(event, data)

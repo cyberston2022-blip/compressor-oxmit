@@ -377,6 +377,35 @@ def test_promo_row_present_when_link_configured_even_if_disabled():
 
 
 # ---------------------------------------------------------------------------
+# OwnerOnlyMiddleware: access_mode is the single authority — OWNER_ONLY in
+# .env must not silently re-privatize an explicit public mode (production
+# bug the owner hit as "ربات هنوز خصوصیه و فقط برای @oxmit بازه")
+# ---------------------------------------------------------------------------
+
+async def test_owner_middleware_access_mode_is_single_authority():
+    from oxmit.bot import OwnerOnlyMiddleware
+    cfg = SimpleNamespace(owner_telegram_id=42, admin_ids=[], owner_only=True)
+    state = SimpleNamespace(access_mode="public", owner_only=False)
+    mw = OwnerOnlyMiddleware(cfg, state)
+    called = []
+
+    async def handler(ev, data):
+        called.append(ev)
+
+    await mw(handler, SimpleNamespace(from_user=SimpleNamespace(id=1000)), {})
+    assert len(called) == 1  # public mode: non-owner passes despite OWNER_ONLY env
+
+    state.access_mode = "private"
+    blocked = SimpleNamespace(from_user=SimpleNamespace(id=1000), answer=Recorder())
+    await mw(handler, blocked, {})
+    assert len(called) == 1  # non-owner blocked: no handler call
+    assert "خصوصی" in blocked.answer.answers[0]["text"]
+
+    await mw(handler, SimpleNamespace(from_user=SimpleNamespace(id=42)), {})
+    assert len(called) == 2  # owner always passes
+
+
+# ---------------------------------------------------------------------------
 # FIX-3: panel config API is allowlisted (no arbitrary app_config writes,
 # no private identifiers echoed to the browser)
 # ---------------------------------------------------------------------------
