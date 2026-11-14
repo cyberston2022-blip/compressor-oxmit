@@ -144,6 +144,19 @@ async def test_resolve_invite_link_not_directly_resolvable():
     assert state.gate_channel_id == ""
 
 
+async def test_resolve_trusts_existing_resolution_when_verified():
+    db, state = FakeDB(), make_state("https://t.me/+abc123", "-100222")
+    gate = GateService(db, state)
+    bot = StubBot(chats={-100222: StubChat(
+        -100222, invite_link=SimpleNamespace(invite_link="https://t.me/+abc123"))})
+    assert await gate.resolve(bot) == "-100222"
+    # stale resolution (link changed) -> cleared, direct path fails anyway
+    db.cfg["gate_channel"] = "https://t.me/+other999"
+    state.gate_channel = "https://t.me/+other999"
+    assert await gate.resolve(bot) is None
+    assert state.gate_channel_id == ""
+
+
 async def test_verify_candidate_by_primary_invite_link():
     db, state = FakeDB(), make_state("https://t.me/+abc123")
     gate = GateService(db, state)

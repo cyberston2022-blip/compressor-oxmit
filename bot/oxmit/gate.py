@@ -120,6 +120,14 @@ class GateService:
         if kind == "id":
             await self._persist_id(value)
             return value
+        if self.resolved_id:
+            # already resolved (e.g. captured earlier and persisted): trust
+            # it only while it still verifies against the target
+            if await self.verify_candidate(bot, self.resolved_id):
+                return self.resolved_id
+            log.info("gate stored resolution no longer matches target - clearing")
+            self.state.gate_channel_id = ""
+            await self.db.set_config("gate_channel_id", "")
         try:
             chat = await bot.get_chat(value)
         except Exception:  # noqa: BLE001 - invite links are not resolvable
