@@ -23,8 +23,9 @@ from aiogram.types import (
 from .. import audit as audit_mod
 from .. import media as media_mod
 from .. import permissions as perms
+from ..edu480 import fmt_eta_range_fa
 from ..log import get_logger
-from ..texts import tr
+from ..texts import to_fa_digits, tr
 from .common import ensure_user
 
 log = get_logger("oxmit.nav")
@@ -32,11 +33,120 @@ log = get_logger("oxmit.nav")
 _HOME_ROW = [InlineKeyboardButton(text=tr("nav_btn_home", "fa"),
                                   callback_data="menu:home")]
 
+_STATUS_ICON = {"queued": "🟡", "deferred": "🕓", "processing": "⚙️",
+                "completed": "🟢", "failed": "🔴", "cancelled": "🚫"}
+_STAGE_LABEL_KEY = {
+    "reserved": "st_reserved", "downloading": "st_downloading",
+    "probing": "st_probing", "checking": "st_checking",
+    "encoding": "st_encoding", "validating": "st_validating",
+    "uploading": "st_uploading", "upload_retry": "st_upload_retry",
+}
 
-def format_job_line(name: str, status_label: str, profile, job_id) -> str:
-    """One «کارهای من» row. UUID-safe: asyncpg returns pgproto.UUID objects
-    for uuid columns, so the short-id slice must go through str()."""
-    return f"   {status_label} | {profile} | `{str(job_id)[:8]}`"
+
+def _short(row) -> str:
+    """UUID-safe short id: asyncpg returns pgproto.UUID objects, not str."""
+    return str(row["id"])[:8]
+
+
+def jobs_panel_text(rows: list[dict], qinfos: dict[str, dict]) -> str:
+    """Pure renderer for the «کارهای من» panel (testable without aiogram)."""
+    def name_of(r):
+        return (r.get("filename") or tr("nav_jobs_noname", "fa"))[:28]
+
+    processing, queued, done, failed = [], [], [], []
+    for r in rows:
+        st = r.get("status")
+        if st == "processing":
+            processing.append(r)
+        elif st in ("queued", "deferred"):
+            queued.append(r)
+        elif st == "completed":
+            done.append(r)
+        elif st == "failed":
+            failed.append(r)
+
+    lines = [tr("myjobs_title", "fa"), "━━━━━━━━━━━━━━━"]
+    if processing:
+        lines.append(tr("myjobs_active_header", "fa"))
+        for r in processing:
+            stage_label = tr(_STAGE_LABEL_KEY.get(r.get("stage") or "",
+                                                 "nav_st_processing"), "fa")
+            lines.append(tr("myjobs_progress_line", "fa",
+                            icon=_STATUS_ICON["processing"], name=name_of(r),
+                            stage=stage_label,
+                            pct=to_fa_digits(int(r.get("progress") or 0)),
+                            jid=_short(r)))
+    if queued:
+        lines.append(tr("myjobs_queued_header", "fa"))
+        for r in queued:
+            st = r.get("status")
+            icon = _STATUS_ICON.get(st, "🟡")
+            if st == "deferred":
+                lines.append(tr("myjobs_deferred_line", "fa", icon=icon,
+                                name=name_of(r),
+                                label=tr("nav_st_deferred", "fa"),
+                                jid=_short(r)))
+                continue
+            qi = qinfos.get(str(r["id"])) or {}
+            pos = qi.get("position") or 1
+            low, high = qi.get("eta_low"), qi.get("eta_high")
+            eta = fmt_eta_range_fa(low, high) if (low and high) else \
+                tr("nav_st_queued", "fa").replace("🟡 ", "")
+            lines.append(tr("myjobs_queue_line", "fa", icon=icon,
+                            name=name_of(r), pos=to_fa_digits(int(pos)),
+                            eta=eta, jid=_short(r)))
+    if done:
+        lines.append(tr("myjobs_done_header", "fa"))
+        for r in done[:3]:
+            out, src = int(r.get("output_size") or 0), int(r.get("source_size") or 0)
+            saved = ""
+            if src > 0 and out > 0:
+                pct_saved = round((1 - out / src) * 100)
+                if pct_saved >= 1:
+                    saved = tr("myjobs_saved", "fa", saved=to_fa_digits(pct_saved))
+            lines.append(tr("myjobs_done_line", "fa", name=name_of(r),
+                            out=media_mod.human_size(out) if out else "-",
+                            src=media_mod.human_size(src) if src else "-",
+                            saved=saved, jid=_short(r)))
+    if failed:
+        lines.append(tr("myjobs_failed_header", "fa"))
+        for r in failed[:3]:
+            lines.append(tr("myjobs_failed_line", "fa", name=name_of(r),
+                            label=tr("nav_st_failed", "fa"), jid=_short(r)))
+    if len(lines) == 2:
+        lines.append(tr("nav_jobs_empty", "fa"))
+    return "\n".join(lines)
+
+
+def jobs_panel_kb(rows: list[dict], uid: int) -> InlineKeyboardMarkup:
+    """Per-row action buttons. Cancel renders ONLY for the original
+    submitter — intake's canc: handler enforces the identical rule, so a
+    'joined' requester (dedup) never sees a button they cannot use."""
+    kb_rows: list[list[InlineKeyboardButton]] = []
+    for r in rows:
+        st = r.get("status")
+        if st == "cancelled":
+            continue
+        jid = str(r["id"])
+        nm = (r.get("filename") or tr("nav_jobs_noname", "fa"))[:20]
+        if st in ("processing", "queued", "deferred"):
+            if int(r.get("requester_tg_id") or 0) == uid:
+                kb_rows.append([InlineKeyboardButton(
+                    text=tr("myjobs_btn_cancel", "fa", name=nm),
+                    callback_data=f"canc:{jid}")])
+        elif st == "completed":
+            kb_rows.append([InlineKeyboardButton(
+                text=tr("myjobs_btn_redeliver", "fa", name=nm),
+                callback_data=f"rdl:{jid}")])
+        elif st == "failed":
+            kb_rows.append([InlineKeyboardButton(
+                text=tr("myjobs_btn_retry", "fa", name=nm),
+                callback_data=f"rtry:{jid}")])
+    kb_rows.append([InlineKeyboardButton(text=tr("nav_btn_refresh", "fa"),
+                                         callback_data="menu:jobs"),
+                    InlineKeyboardButton(text=tr("nav_btn_home", "fa"),
+                                         callback_data="menu:home")])
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
 async def send_denial(engine, db, chat_id: int, tg_id: int, perm: str) -> None:
@@ -186,51 +296,41 @@ def build_router(engine, db, cfg, state) -> Router:
         await _edit(cb, tr("nav_help", "fa"), kb)
 
     # ------------------------------------------------------------------
-    # my jobs (own rows only, parameterized, safe prefix ids)
+    # my jobs — rich glass panel (own rows only, parameterized, safe ids)
     # ------------------------------------------------------------------
-    _STATUS_VIEW = {
-        "queued": ("🟡", "nav_st_queued"),
-        "deferred": ("🕓", "nav_st_deferred"),
-        "processing": ("⚙️", "nav_st_processing"),
-        "completed": ("🟢", "nav_st_completed"),
-        "failed": ("🔴", "nav_st_failed"),
-        "cancelled": ("🚫", "nav_st_cancelled"),
-    }
-
-    async def _jobs_text(tg_id: int) -> str:
+    async def _jobs_panel_rows(tg_id: int) -> list[dict]:
         rows = await db.fetch(
             """
-            SELECT j.id, j.status, j.progress, j.profile, m.filename
+            SELECT j.id, j.status, j.stage, j.progress, j.profile,
+                   j.source_size, j.output_size, j.requester_tg_id, m.filename
             FROM jobs j
             LEFT JOIN media_assets m ON m.id = j.media_id
             WHERE j.requester_tg_id = $1
                OR EXISTS (SELECT 1 FROM job_requesters jr
                           WHERE jr.job_id = j.id AND jr.tg_id = $1)
-            ORDER BY j.enqueued_at DESC
-            LIMIT 5
+            ORDER BY CASE j.status WHEN 'processing' THEN 0
+                     WHEN 'queued' THEN 1 WHEN 'deferred' THEN 2
+                     WHEN 'completed' THEN 3 WHEN 'failed' THEN 4
+                     ELSE 5 END, j.enqueued_at DESC
+            LIMIT 14
             """,
             tg_id,
         )
-        lines = [tr("nav_jobs_title", "fa"), "━━━━━━━━━━━━━━━"]
-        if not rows:
-            lines.append(tr("nav_jobs_empty", "fa"))
-        for r in rows:
-            icon, key = _STATUS_VIEW.get(r["status"], ("•", "nav_st_queued"))
-            name = (r["filename"] or tr("nav_jobs_noname", "fa"))[:32]
-            lines.append(f"{icon} {name}")
-            lines.append(format_job_line(name, tr(key, "fa"), r["profile"], r["id"]))
-        return "\n".join(lines)
+        return [dict(r) for r in rows]
 
     async def _show_jobs(msg_or_cb, edit: bool) -> None:
         uid = _uid_of(msg_or_cb)
         if uid is None:
             return
-        text = await _jobs_text(uid)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=tr("nav_btn_refresh", "fa"),
-                                  callback_data="menu:jobs"),
-             InlineKeyboardButton(text=tr("nav_btn_home", "fa"),
-                                  callback_data="menu:home")]])
+        rows = await _jobs_panel_rows(uid)
+        qinfos: dict[str, dict] = {}
+        for r in rows:
+            if r["status"] == "queued":
+                # bounded: a user cannot have more queued jobs than their
+                # max_pending tier limit (default 10)
+                qinfos[str(r["id"])] = await engine.queue_info(str(r["id"]))
+        text = jobs_panel_text(rows, qinfos)
+        kb = jobs_panel_kb(rows, uid)
         msg = msg_or_cb.message if hasattr(msg_or_cb, "message") else msg_or_cb
         try:
             if edit and msg is not None:

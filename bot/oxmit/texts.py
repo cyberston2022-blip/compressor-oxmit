@@ -820,6 +820,36 @@ T: dict[str, dict[str, str]] = {
     "nav_jobs_title": {"fa": "📋 کارهای اخیر شما", "en": "📋 Your recent jobs"},
     "nav_jobs_empty": {"fa": "— هنوز کاری ثبت نکرده‌ای. یک ویدیو بفرست!", "en": "— no jobs yet. Send a video!"},
     "nav_jobs_noname": {"fa": "بدون نام", "en": "unnamed"},
+    # ---- «کارهای من» rich panel ----
+    "myjobs_title": {"fa": "📋 پنل کارهای من", "en": "📋 My jobs panel"},
+    "myjobs_active_header": {"fa": "⚙️ در حال پردازش", "en": "⚙️ In progress"},
+    "myjobs_queued_header": {"fa": "🟡 در صف", "en": "🟡 Queued"},
+    "myjobs_done_header": {"fa": "🟢 اخیراً تکمیل‌شده", "en": "🟢 Recently completed"},
+    "myjobs_failed_header": {"fa": "🔴 ناموفق", "en": "🔴 Failed"},
+    "myjobs_progress_line": {
+        "fa": "{icon} {name}\n   ▶️ {stage} | {pct}٪ | کد: `{jid}`",
+        "en": "{icon} {name}\n   ▶️ {stage} | {pct}% | id: `{jid}`",
+    },
+    "myjobs_queue_line": {
+        "fa": "{icon} {name}\n   🧾 موقعیت در صف: {pos} | ⏳ رسیدن به فشرده‌سازی: {eta}\n   کد: `{jid}`",
+        "en": "{icon} {name}\n   🧾 Queue position: {pos} | ⏳ until encoding: {eta}\n   id: `{jid}`",
+    },
+    "myjobs_deferred_line": {
+        "fa": "{icon} {name}\n   {label}\n   کد: `{jid}`",
+        "en": "{icon} {name}\n   {label}\n   id: `{jid}`",
+    },
+    "myjobs_done_line": {
+        "fa": "🟢 {name}\n   📦 خروجی: {out} از {src}{saved} | کد: `{jid}`",
+        "en": "🟢 {name}\n   📦 output: {out} of {src}{saved} | id: `{jid}`",
+    },
+    "myjobs_saved": {"fa": " ({saved}٪ کاهش)", "en": " ({saved}% smaller)"},
+    "myjobs_failed_line": {
+        "fa": "🔴 {name} | {label}\n   کد: `{jid}`",
+        "en": "🔴 {name} | {label}\n   id: `{jid}`",
+    },
+    "myjobs_btn_cancel": {"fa": "❌ لغو: {name}", "en": "❌ Cancel: {name}"},
+    "myjobs_btn_redeliver": {"fa": "📩 دریافت مجدد: {name}", "en": "📩 Redeliver: {name}"},
+    "myjobs_btn_retry": {"fa": "🔁 تلاش دوباره: {name}", "en": "🔁 Retry: {name}"},
     "nav_st_queued": {"fa": "🟡 در صف", "en": "🟡 queued"},
     "nav_st_deferred": {"fa": "🕓 معلق (ظرفیت)", "en": "🕓 deferred"},
     "nav_st_processing": {"fa": "⚙️ در حال پردازش", "en": "⚙️ processing"},

@@ -367,18 +367,62 @@ async def test_forcesub_current_reads_prefilled_disabled_channel():
     assert await forcesub.gate(type("E", (), {"bot": None})(), db, 123) is None
 
 
-def test_job_line_is_uuid_safe():
+def _panel_row(jid, status, *, stage="queued", progress=0, src=1_000_000,
+               out=None, requester=1000, filename="video.mp4", err=None):
+    return {"id": jid, "status": status, "stage": stage, "progress": progress,
+            "profile": "edu480", "source_size": src, "output_size": out,
+            "requester_tg_id": requester, "filename": filename,
+            "error_message": err}
+
+
+def test_jobs_panel_text_sections_are_uuid_safe():
     # regression: «کارهای من» crashed with TypeError because asyncpg returns
-    # pgproto.UUID objects (not str) for uuid columns; str() must be applied
-    # before the [:8] slice - also in merge session dirs/logs (same class).
+    # pgproto.UUID objects (not str) for uuid columns - the panel builders
+    # must run through str() for every short-id slice.
     import uuid as uuid_mod
-    from oxmit.handlers.nav import format_job_line
-    jid = uuid_mod.uuid4()
-    line = format_job_line("lecture.mp4", "انجام شد", "edu480", jid)
-    assert str(jid)[:8] in line and "edu480" in line
-    # a str id yields the same shape
-    assert format_job_line("v.mp4", "ok", "edu480", "abcdef12-3456") == \
-        "   ok | edu480 | `abcdef12`"
+    from oxmit.handlers.nav import jobs_panel_text
+    jid_p, jid_q, jid_c = (uuid_mod.uuid4() for _ in range(3))
+    rows = [
+        _panel_row(jid_p, "processing", stage="encoding", progress=42),
+        _panel_row(jid_q, "queued"),
+        _panel_row(jid_c, "completed", src=1_000_000, out=300_000),
+    ]
+    qinfos = {str(jid_q): {"position": 3, "ahead": 2, "eta_low": 600,
+                           "eta_high": 900}}
+    text = jobs_panel_text(rows, qinfos)
+    assert "در حال پردازش" in text and "در صف" in text and "تکمیل‌شده" in text
+    assert "۴۲" in text                      # progress rendered as fa digits
+    assert "موقعیت در صف" in text            # queue position present
+    assert str(jid_p)[:8] in text            # UUID-safe short id
+    assert "کاهش" in text                    # completed shows saving
+    # empty state
+    assert "ثبت نکرده‌ای" in jobs_panel_text([], {})
+
+
+def test_jobs_panel_kb_actions_and_cancel_authorization():
+    import uuid as uuid_mod
+    from oxmit.handlers.nav import jobs_panel_kb
+    jid_p, jid_q, jid_c, jid_f = (uuid_mod.uuid4() for _ in range(4))
+    rows = [
+        _panel_row(jid_p, "processing", requester=1000),
+        _panel_row(jid_q, "queued", requester=1000),
+        _panel_row(jid_c, "completed", requester=1000),
+        _panel_row(jid_f, "failed", requester=1000),
+    ]
+    kb = jobs_panel_kb(rows, 1000)
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert f"canc:{jid_p}" in cbs and f"canc:{jid_q}" in cbs
+    assert f"rdl:{jid_c}" in cbs and f"rtry:{jid_f}" in cbs
+    assert "menu:jobs" in cbs and "menu:home" in cbs  # refresh + home
+    # a 'joined' requester (row in job_requesters, not the submitter) must
+    # NOT get a cancel button - intake's canc: handler enforces the same
+    kb2 = jobs_panel_kb([_panel_row(jid_p, "processing", requester=999)], 1000)
+    cbs2 = [b.callback_data for row in kb2.inline_keyboard for b in row]
+    assert f"canc:{jid_p}" not in cbs2
+    # cancelled jobs render no row at all
+    kb3 = jobs_panel_kb([_panel_row(jid_f, "cancelled", requester=1000)], 1000)
+    cbs3 = [b.callback_data for row in kb3.inline_keyboard for b in row]
+    assert all(c.startswith(("menu:",)) for c in cbs3)
 
 
 def test_promo_row_present_when_link_configured_even_if_disabled():
