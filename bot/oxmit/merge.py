@@ -84,7 +84,7 @@ async def add_item(db, session_id: str, media_id, staged_path: str,
                 session_id, seq, media_id, staged_path, size_bytes,
             )
     log.info("merge item staged", extra={
-        "detail": f"session={session_id[:8]} seq={seq} size={size_bytes}"})
+        "detail": f"session={str(session_id)[:8]} seq={seq} size={size_bytes}"})
     return seq
 
 

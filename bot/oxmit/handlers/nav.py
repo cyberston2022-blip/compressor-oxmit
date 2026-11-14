@@ -33,6 +33,12 @@ _HOME_ROW = [InlineKeyboardButton(text=tr("nav_btn_home", "fa"),
                                   callback_data="menu:home")]
 
 
+def format_job_line(name: str, status_label: str, profile, job_id) -> str:
+    """One «کارهای من» row. UUID-safe: asyncpg returns pgproto.UUID objects
+    for uuid columns, so the short-id slice must go through str()."""
+    return f"   {status_label} | {profile} | `{str(job_id)[:8]}`"
+
+
 async def send_denial(engine, db, chat_id: int, tg_id: int, perm: str) -> None:
     """Actionable permission denial (spec §25/E15): explain + request button.
 
@@ -212,7 +218,7 @@ def build_router(engine, db, cfg, state) -> Router:
             icon, key = _STATUS_VIEW.get(r["status"], ("•", "nav_st_queued"))
             name = (r["filename"] or tr("nav_jobs_noname", "fa"))[:32]
             lines.append(f"{icon} {name}")
-            lines.append(f"   {tr(key, 'fa')} | {r['profile']} | `{r['id'][:8]}`")
+            lines.append(format_job_line(name, tr(key, "fa"), r["profile"], r["id"]))
         return "\n".join(lines)
 
     async def _show_jobs(msg_or_cb, edit: bool) -> None:

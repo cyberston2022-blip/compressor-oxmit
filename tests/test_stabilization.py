@@ -367,6 +367,20 @@ async def test_forcesub_current_reads_prefilled_disabled_channel():
     assert await forcesub.gate(type("E", (), {"bot": None})(), db, 123) is None
 
 
+def test_job_line_is_uuid_safe():
+    # regression: «کارهای من» crashed with TypeError because asyncpg returns
+    # pgproto.UUID objects (not str) for uuid columns; str() must be applied
+    # before the [:8] slice - also in merge session dirs/logs (same class).
+    import uuid as uuid_mod
+    from oxmit.handlers.nav import format_job_line
+    jid = uuid_mod.uuid4()
+    line = format_job_line("lecture.mp4", "انجام شد", "edu480", jid)
+    assert str(jid)[:8] in line and "edu480" in line
+    # a str id yields the same shape
+    assert format_job_line("v.mp4", "ok", "edu480", "abcdef12-3456") == \
+        "   ok | edu480 | `abcdef12`"
+
+
 def test_promo_row_present_when_link_configured_even_if_disabled():
     from oxmit import forcesub
     row = forcesub.promo_row({"enabled": False, "channel_id": -1003776739475,

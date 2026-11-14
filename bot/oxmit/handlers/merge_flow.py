@@ -155,7 +155,7 @@ def build_router(engine, db, cfg, state) -> Router:
             + "\n" + tr("mrg_rules", "fa", maxn=MAX_ITEMS),
             reply_markup=_session_kb("fa"))
         log.info("merge session opened", extra={
-            "detail": f"session={sess['id'][:8]} user={uid} compress={compress}"})
+            "detail": f"session={str(sess['id'])[:8]} user={uid} compress={compress}"})
 
     # ------------------------------------------------------------------
     # video capture during an active collecting session (filter-gated)
@@ -203,7 +203,7 @@ def build_router(engine, db, cfg, state) -> Router:
         # Stage a stable copy: bot-api files can be evicted; the merge needs
         # every input alive until it runs (staged under the session dir with
         # the assigned sequence as the name).
-        stage_dir = f"{cfg.media_incoming}/merge-{sess['id'][:8]}"
+        stage_dir = f"{cfg.media_incoming}/merge-{str(sess['id'])[:8]}"
         try:
             seq = await merge_mod.add_item(
                 db, sess["id"], media_id, "", size, probe.get("duration_s"))
@@ -342,7 +342,7 @@ def build_router(engine, db, cfg, state) -> Router:
         try:
             await merge_mod.cleanup_session_files(db, sess["id"])
         except Exception:  # noqa: BLE001 - cleanup is best-effort
-            log.warning("merge cleanup failed", extra={"detail": sess["id"][:8]})
+            log.warning("merge cleanup failed", extra={"detail": str(sess["id"])[:8]})
         await engine.bot.send_message(chat_id, tr("mrg_cancelled_msg", "fa"))
 
     async def _do_finish(uid: int, sess: dict, chat_id: int) -> None:

@@ -1287,13 +1287,13 @@ class JobEngine(QueueMixin):
             strategy_label = tr("mrg_strategy_copy", lang) if strategy == "copy" \
                 else tr("mrg_strategy_reencode", lang)
             expected = sum((p.get("duration_s") or 0.0) for p in probes)
-            work_dir = Path(self.cfg.media_incoming) / f"merge-{session_id[:8]}"
+            work_dir = Path(self.cfg.media_incoming) / f"merge-{str(session_id)[:8]}"
             work_dir.mkdir(parents=True, exist_ok=True)
-            out_dir = Path(self.cfg.media_out) / f"merge-{session_id[:8]}"
+            out_dir = Path(self.cfg.media_out) / f"merge-{str(session_id)[:8]}"
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / "merged.mp4"
             log.info("merge strategy chosen", extra={
-                "detail": f"session={session_id[:8]} strategy={strategy} ({why})"})
+                "detail": f"session={str(session_id)[:8]} strategy={strategy} ({why})"})
             await _stage(tr("mrg_stage_merge", lang) + "\n" + strategy_label)
             if strategy == "copy":
                 await merge_mod.run_copy_merge(
@@ -1396,14 +1396,14 @@ class JobEngine(QueueMixin):
             await merge_mod.set_status(self.db, session_id, "failed", str(exc)[:200])
             await self.db.bump("merges_failed")
             log.warning("merge failed", extra={
-                "detail": f"session={session_id[:8]}: {exc}"})
+                "detail": f"session={str(session_id)[:8]}: {exc}"})
             try:
                 await self.bot.send_message(
                     chat_id, tr("mrg_failed", lang, reason=str(exc)[:160]))
             except TelegramAPIError:
                 pass
         except Exception:  # noqa: BLE001 - never leave the session 'merging'
-            log.exception("merge_job crashed", extra={"detail": session_id[:8]})
+            log.exception("merge_job crashed", extra={"detail": str(session_id)[:8]})
             await merge_mod.set_status(self.db, session_id, "failed",
                                        "internal error")
             await self.db.bump("merges_failed")
