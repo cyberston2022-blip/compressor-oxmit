@@ -197,6 +197,10 @@ def build_router(engine, db, cfg, state) -> Router:
         if job_id:
             await db.execute("UPDATE intake_drafts SET job_id = $2 WHERE id = $1",
                              draft["id"], _as_uuid(job_id))
+            await db.execute(
+                "UPDATE users SET total_requests = total_requests + 1, last_seen_at = now() WHERE tg_id = $1",
+                draft["tg_id"]
+            )
         outcome = result.get("outcome")
         if outcome == "queued" and status_id:
             text = engine.queue_card_text(

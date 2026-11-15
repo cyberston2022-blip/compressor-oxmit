@@ -16,6 +16,7 @@ import math
 import uuid
 from typing import Any
 
+from .media import human_size
 from .log import get_logger
 
 log = get_logger("oxmit.queue_scheduler")
@@ -350,6 +351,7 @@ class QueueScheduler:
         rows = await self.db.fetch(sql, limit)
         items = []
         for r in rows:
+            sz = int(r["source_size"] or 0)
             items.append({
                 "pos": r["global_queue_position"],
                 "id": r["id"],
@@ -362,7 +364,10 @@ class QueueScheduler:
                 "boost": r["priority_boost"],
                 "enqueued_at": r["enqueued_at"].isoformat() if r["enqueued_at"] else "",
                 "filename": r["filename"] or "video.mp4",
-                "size_bytes": r["source_size"] or 0,
+                "source_size": sz,
+                "size_bytes": sz,
+                "file_size_bytes": sz,
+                "size_formatted": human_size(sz),
                 "duration_s": r["duration_s"] or 0,
                 "profile": r["profile"],
             })

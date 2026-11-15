@@ -79,6 +79,7 @@ async def list_bot_users(
     data_sql = f"""
         SELECT u.tg_id, u.first_name, u.username, u.is_vip, u.is_blocked, u.is_admin,
                u.banned_at, u.ban_reason, u.last_seen_at, u.created_at, u.total_requests,
+               count(j.id) AS total_jobs,
                count(j.id) FILTER (WHERE j.enqueued_at > now() - interval '24 hours') AS jobs24,
                count(j.id) FILTER (WHERE j.status IN ('queued','processing')) AS pending_jobs
         FROM users u LEFT JOIN jobs j ON j.requester_tg_id = u.tg_id
@@ -91,6 +92,7 @@ async def list_bot_users(
 
     users = []
     for r in rows:
+        total_req = max(int(r.get("total_requests") or 0), int(r.get("total_jobs") or 0))
         users.append(
             {
                 "tg_id": r["tg_id"],
@@ -103,7 +105,8 @@ async def list_bot_users(
                 "ban_reason": r.get("ban_reason"),
                 "created_at": _iso(r.get("created_at")),
                 "last_seen_at": _iso(r.get("last_seen_at")),
-                "jobs_count": int(r.get("total_requests") or 0),
+                "total_requests": total_req,
+                "jobs_count": total_req,
                 "jobs24": int(r.get("jobs24") or 0),
                 "pending_jobs": int(r.get("pending_jobs") or 0),
             }

@@ -189,6 +189,7 @@ class DockerManager:
                     "name": c["name"],
                     "image": c["image"],
                     "status": c["status"],
+                    "state": c["status"],
                     "health": c["health"],
                     "created": now_iso,
                 }
@@ -216,6 +217,7 @@ class DockerManager:
                         "name": c.name.lstrip("/"),
                         "image": img,
                         "status": c.status,
+                        "state": c.status,
                         "health": health,
                         "created": attrs.get("Created", ""),
                     }

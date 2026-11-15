@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import hmac as hmac_mod
 import json
+import math
 import os
 import secrets
 import shutil
@@ -235,34 +236,41 @@ async def summary_data(engine, db, cfg, state) -> dict:
     active_cnt = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'processing'") or 0
     queued_cnt = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'queued'") or 0
 
-    # Today stats calculated from 00:00:00 Asia/Tehran
+    # Today stats calculated from last 24 hours
     completed_today = await db.fetchval(
         """
         SELECT count(*) FROM jobs
         WHERE status = 'completed'
-          AND completed_at >= (now() AT TIME ZONE 'Asia/Tehran')::date AT TIME ZONE 'Asia/Tehran'
+          AND completed_at >= now() - interval '24 hours'
         """
     ) or 0
     failed_today = await db.fetchval(
         """
         SELECT count(*) FROM jobs
         WHERE status = 'failed'
-          AND completed_at >= (now() AT TIME ZONE 'Asia/Tehran')::date AT TIME ZONE 'Asia/Tehran'
+          AND completed_at >= now() - interval '24 hours'
         """
     ) or 0
     bytes_saved_today = await db.fetchval(
         """
         SELECT COALESCE(SUM(GREATEST(0, source_size - output_size)), 0) FROM jobs
         WHERE status = 'completed'
-          AND completed_at >= (now() AT TIME ZONE 'Asia/Tehran')::date AT TIME ZONE 'Asia/Tehran'
+          AND completed_at >= now() - interval '24 hours'
         """
     ) or 0
 
-    downloading_cnt = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'processing' AND stage = 'downloading'") or 0
-    encoding_cnt = await db.fetchval("SELECT count(*) FROM jobs WHERE status = 'processing' AND stage = 'encoding'") or 0
-    uploading_cnt = await db.fetchval(
-        "SELECT count(*) FROM jobs WHERE status = 'processing' AND stage IN ('uploading','completing','validating','archiving')"
-    ) or 0
+    stage_rows = await db.fetch(
+        "SELECT stage, count(*) AS cnt FROM jobs WHERE status = 'processing' GROUP BY stage"
+    )
+    stage_map = {r["stage"]: r["cnt"] for r in stage_rows}
+    downloading_cnt = stage_map.get("downloading", 0) + stage_map.get("reserved", 0) + stage_map.get("download_retry", 0)
+    encoding_cnt = stage_map.get("encoding", 0) + stage_map.get("validating", 0) + stage_map.get("probing", 0)
+    uploading_cnt = stage_map.get("uploading", 0) + stage_map.get("completing", 0) + stage_map.get("archiving", 0) + stage_map.get("upload_retry", 0)
+    other_cnt = sum(c for st, c in stage_map.items() if st not in (
+        'downloading', 'reserved', 'download_retry', 'encoding', 'validating', 'probing',
+        'uploading', 'completing', 'archiving', 'upload_retry'
+    ))
+    encoding_cnt += other_cnt
 
     data["active"] = active_cnt
     data["queued"] = queued_cnt
@@ -393,6 +401,8 @@ async def users_data(db) -> list:
             "vip": bool(r["is_vip"]),
             "blocked": bool(r["is_blocked"]),
             "jobs": r["jobs"],
+            "jobs_count": max(int(r["total_requests"] or 0), int(r["jobs"] or 0)),
+            "total_requests": max(int(r["total_requests"] or 0), int(r["jobs"] or 0)),
             "bytes": int(r["bytes_in"] or 0),
             "last_seen_s": int(last.timestamp()) if last else None,
         })
@@ -1081,13 +1091,16 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
                 cur_sess = _session(request)
                 if cur_sess is not session or not is_owner_session(cur_sess, configured_owner):
                     break
-                events = await audit_mod.recent(db, limit=8)
-                payload = {"summary": await summary_data(engine, db, cfg, state),
-                           "active": await active_data(db),
-                           "events": [{"ts": e["ts"].isoformat(), "actor": e["actor"],
-                                       "action": e["action"], "target": e["target"],
-                                       "details": e["details"]} for e in events]}
-                await ws.send_str(json.dumps(payload))
+                try:
+                    events = await audit_mod.recent(db, limit=8)
+                    payload = {"summary": await summary_data(engine, db, cfg, state),
+                               "active": await active_data(db),
+                               "events": [{"ts": e["ts"].isoformat(), "actor": e["actor"],
+                                           "action": e["action"], "target": e["target"],
+                                           "details": e["details"]} for e in events]}
+                    await ws.send_str(json.dumps(payload))
+                except Exception as loop_err:
+                    log.warning("panel ws loop error: %s", loop_err)
                 try:
                     msg = await ws.receive(timeout=3.0)
                     if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING,

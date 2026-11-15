@@ -1449,6 +1449,50 @@ function renderActiveTasks(activeJobs) {
   }).join("");
 }
 
+function renderKpiCards(c) {
+  if (!c) return;
+  const maxWorkers = c.max_concurrent || 3;
+  const maxQueue = c.max_queue || 500;
+
+  // Card 1: Active
+  const actEl = $("#kpi-active");
+  if (actEl) actEl.innerHTML = `<bdi dir="ltr">${fa(c.active || 0)} / ${fa(maxWorkers)}</bdi>`;
+  const dCnt = c.active_downloads !== undefined ? c.active_downloads : (c.downloading || 0);
+  const eCnt = c.active_encodes !== undefined ? c.active_encodes : (c.encoding || (c.active || 0));
+  const uCnt = c.active_uploads !== undefined ? c.active_uploads : (c.uploading || 0);
+  const actSub = $("#kpi-active-sub");
+  if (actSub) {
+    actSub.textContent = `${fa(dCnt)} دانلود | ${fa(eCnt)} انکود | ${fa(uCnt)} آپلود`;
+  }
+
+  // Card 2: Queued
+  const qEl = $("#kpi-queue");
+  if (qEl) qEl.innerHTML = `<bdi dir="ltr">${fa(c.queued || 0)} / ${fa(maxQueue)}</bdi>`;
+  const qSub = qEl ? qEl.parentElement.querySelector(".sub") : null;
+  if (qSub) {
+    qSub.textContent = c.est_clear_time_fa ? `تخلیه صف: ~${c.est_clear_time_fa}` : "در انتظار نوبت پردازش";
+  }
+
+  // Card 3: Completed Today
+  const compEl = $("#kpi-completed");
+  if (compEl) compEl.innerHTML = `${fa(c.completed || 0)} ویدیو`;
+  const compSub = compEl ? compEl.parentElement.querySelector(".sub") : null;
+  if (compSub) {
+    if (c.bytes_saved_today) {
+      const gb = (c.bytes_saved_today / 1073741824).toFixed(1);
+      compSub.textContent = `${gb} GB صرفه‌جویی حجم`;
+    } else {
+      compSub.textContent = "تکمیل موفق ویدیوها";
+    }
+  }
+
+  // Card 4: Failed Today
+  const failEl = $("#kpi-failed");
+  if (failEl) failEl.innerHTML = `${fa(c.failed || 0)} خطا`;
+
+  if ($("#tab-cnt-active")) $("#tab-cnt-active").textContent = (c.active || 0) + (c.queued || 0);
+}
+
 /* Overview and KPIs */
 async function loadOverview() {
   try {
@@ -1460,42 +1504,8 @@ async function loadOverview() {
     ]);
 
     // KPI values
-    const c = summary.counters || {};
-    const maxWorkers = c.max_concurrent || 3;
-    const maxQueue = c.max_queue || 500;
-
-    // Card 1: Active
-    $("#kpi-active").textContent = `${fa(c.active || 0)} / ${fa(maxWorkers)}`;
-    const dCnt = c.active_downloads || 0;
-    const eCnt = c.active_encodes !== undefined ? c.active_encodes : (c.active || 0);
-    const uCnt = c.active_uploads || 0;
-    if ($("#kpi-active-sub")) {
-      $("#kpi-active-sub").textContent = `${fa(dCnt)} دانلود | ${fa(eCnt)} انکود | ${fa(uCnt)} آپلود`;
-    }
-
-    // Card 2: Queued
-    $("#kpi-queue").textContent = `${fa(c.queued || 0)} / ${fa(maxQueue)}`;
-    const qSub = $("#kpi-queue").parentElement.querySelector(".sub");
-    if (qSub) {
-      qSub.textContent = c.est_clear_time_fa ? `تخلیه صف: ~${c.est_clear_time_fa}` : "در انتظار نوبت پردازش";
-    }
-
-    // Card 3: Completed Today
-    $("#kpi-completed").textContent = `${fa(c.completed || 0)} ویدیو`;
-    const compSub = $("#kpi-completed").parentElement.querySelector(".sub");
-    if (compSub) {
-      if (c.bytes_saved_today) {
-        const gb = (c.bytes_saved_today / 1073741824).toFixed(1);
-        compSub.textContent = `${gb} GB صرفه‌جویی حجم`;
-      } else {
-        compSub.textContent = "تکمیل موفق ویدیوها";
-      }
-    }
-
-    // Card 4: Failed Today
-    $("#kpi-failed").textContent = `${fa(c.failed || 0)} خطا`;
-
-    if ($("#tab-cnt-active")) $("#tab-cnt-active").textContent = (c.active || 0) + (c.queued || 0);
+    const c = summary.counters || summary || {};
+    renderKpiCards(c);
 
     if (metrics.disk) {
       $("#kpi-disk").innerHTML = `<bdi dir="ltr">${fa(metrics.disk.free_gb)} GB</bdi> آزاد`;
@@ -1829,7 +1839,8 @@ async function loadQueuePreview(algorithm) {
       const jid = it.jid || (it.job_id ? String(it.job_id).slice(0, 8) : "—");
       const name = it.user_name || it.username || it.user_id || "کاربر";
       const isVip = Boolean(it.is_vip);
-      const sizeStr = it.file_size_bytes ? fmtBytes(it.file_size_bytes) : "—";
+      const rawBytes = it.file_size_bytes || it.source_size || it.size_bytes || 0;
+      const sizeStr = it.size_formatted || (rawBytes ? fmtBytes(rawBytes) : "—");
       const timeStr = it.enqueued_at ? String(it.enqueued_at).slice(11, 19) : "—";
       const scoreStr = it.computed_score !== undefined ? Number(it.computed_score).toFixed(2) : (it.priority || "50");
       return `
@@ -1859,25 +1870,29 @@ async function loadDocker() {
       return;
     }
 
-    grid.innerHTML = d.containers.map(c => `
-      <div class="container-card ${c.state === 'running' ? 'healthy' : 'unhealthy'}">
+    grid.innerHTML = d.containers.map(c => {
+      const isRunning = (c.status === 'running' || c.state === 'running');
+      const isHealthy = (c.health === 'healthy' || c.health === 'none' || !c.health) && isRunning;
+      const displayStatus = c.health && c.health !== 'none' ? `${c.status} (${c.health})` : (c.status || c.state || 'running');
+      return `
+      <div class="container-card ${isRunning ? 'healthy' : 'unhealthy'}">
         <div class="container-top">
           <span class="container-name">
-            <span class="dot ${c.state === 'running' ? '' : 'off'}"></span>
+            <span class="dot ${isRunning ? '' : 'off'}"></span>
             ${esc(c.name)}
           </span>
-          <span class="badge ${c.state === 'running' ? 'online' : ''}">${esc(c.state)}</span>
+          <span class="badge ${isRunning ? 'online' : ''}">${esc(displayStatus)}</span>
         </div>
         <div style="font-size:11.5px;color:var(--ink-mut)">
           <div><b>تصویر:</b> <span class="mono">${esc(c.image)}</span></div>
-          <div><b>وضعیت:</b> ${esc(c.status)}</div>
+          <div><b>وضعیت:</b> ${esc(displayStatus)}</div>
         </div>
         <div class="container-actions">
           <button class="btn" onclick="viewContainerLogs('${esc(c.name)}')"><svg class="ico" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" x2="8" y1="13" y2="13"/><line x1="16" x2="8" y1="17" y2="17"/><line x1="10" x2="8" y1="9" y2="9"/></svg> لاگ‌ها</button>
           <button class="btn danger" onclick="restartContainer('${esc(c.name)}')"><svg class="ico" viewBox="0 0 24 24" width="12" height="12" stroke="currentColor" stroke-width="2" fill="none"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> ری‌استارت</button>
         </div>
       </div>
-    `).join("");
+    `;}).join("");
   } catch (e) {
     toast(`خطای دریافت وضعیت داکر: ${e.message}`, "error");
   }
@@ -2250,7 +2265,7 @@ async function loadBotUsers() {
       const isVip = Boolean(u.is_vip);
       const lastActive = (u.last_seen_at || u.last_activity || u.created_at || '').slice(0, 16).replace('T', ' ');
       const todayJobs = u.jobs24 !== undefined ? u.jobs24 : (u.used_today_files || 0);
-      const totalReq = u.total_requests || 0;
+      const totalReq = u.total_requests !== undefined ? u.total_requests : (u.jobs_count || u.jobs || 0);
       const uname = u.username ? `<bdi dir="ltr">@${esc(u.username)}</bdi>` : '<span style="color:var(--ink-dim)">—</span>';
       const fname = esc(u.first_name || 'بدون نام');
 
@@ -2501,18 +2516,20 @@ function initLiveWs() {
     ws.onopen = () => {
       const dot = $("#dot-ws");
       if (dot) dot.classList.remove("off");
+      const badge = $("#badge-ws");
+      if (badge) {
+        badge.classList.add("online");
+        badge.classList.remove("offline");
+      }
       const txt = $("#text-ws");
-      if (txt) txt.textContent = " لایو (WebSocket)";
+      if (txt) txt.innerHTML = ' لایو <bdi dir="ltr">(WebSocket)</bdi>';
     };
     ws.onmessage = ev => {
       try {
         const d = JSON.parse(ev.data);
         if (d.summary) {
-          const c = d.summary.counters || {};
-          $("#kpi-active").textContent = fa(c.active || 0);
-          $("#kpi-queue").textContent = fa(c.queued || 0);
-          if (c.completed != null) $("#kpi-completed").textContent = fa(c.completed);
-          if (c.failed != null) $("#kpi-failed").textContent = fa(c.failed);
+          const c = d.summary.counters || d.summary || {};
+          renderKpiCards(c);
         }
         if (d.active && currentTab === "overview") {
           renderActiveTasks(d.active);
@@ -2522,8 +2539,13 @@ function initLiveWs() {
     ws.onclose = () => {
       const dot = $("#dot-ws");
       if (dot) dot.classList.add("off");
+      const badge = $("#badge-ws");
+      if (badge) {
+        badge.classList.remove("online");
+        badge.classList.add("offline");
+      }
       const txt = $("#text-ws");
-      if (txt) txt.textContent = " پولینگ (پسیو)";
+      if (txt) txt.innerHTML = ' پولینگ <bdi dir="ltr">(پسیو)</bdi>';
       setTimeout(initLiveWs, 6000);
     };
   } catch (e) {
