@@ -714,7 +714,18 @@ class JobEngine(QueueMixin):
         if custom_limit is not None and custom_limit > 0:
             user_pending = custom_limit
         else:
-            user_pending = max(1, int(tier.get("max_pending") or 10))
+            if is_vip:
+                user_pending = (
+                    dyn.get_int("max_concurrent_jobs_vip", int(tier.get("max_pending") or 30))
+                    if dyn and dyn.get("max_concurrent_jobs_vip")
+                    else max(1, int(tier.get("max_pending") or 30))
+                )
+            else:
+                user_pending = (
+                    dyn.get_int("max_concurrent_jobs_per_user", int(tier.get("max_pending") or 10))
+                    if dyn and dyn.get("max_concurrent_jobs_per_user")
+                    else max(1, int(tier.get("max_pending") or 10))
+                )
 
         user_active = (
             (dyn.get_int("vip_active_job_limit", 3) if is_vip else dyn.get_int("user_active_job_limit", 1))

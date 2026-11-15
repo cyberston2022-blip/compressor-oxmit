@@ -19,7 +19,7 @@ log = get_logger("oxmit.dynamic_config")
 CONFIG_SCHEMA: dict[str, tuple[str, Any, Any, Any, set[Any] | None]] = {
     "accepting_new_jobs": ("bool", True, None, None, None),
     "max_global_queue_size": ("int", 500, 10, 10000, None),
-    "max_concurrent_jobs_per_user": ("int", 3, 1, 50, None),
+    "max_concurrent_jobs_per_user": ("int", 10, 1, 50, None),
     "max_concurrent_jobs_vip": ("int", 10, 1, 100, None),
     "max_file_size_mb": ("int", 3000, 10, 4000, None),
     "active_encoding_workers": ("int", 2, 1, 16, None),
@@ -54,7 +54,7 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
         "desc": "ظرفیت کل صف انتظار پردازش",
     },
     "max_concurrent_jobs_per_user": {
-        "val": 3,
+        "val": 10,
         "type": "int",
         "title": "سقف مجاز ویدیوی همزمان هر کاربر",
         "desc": "حداکثر تعداد کارهای در حال انتظار یا پردازش یک کاربر عادی",
