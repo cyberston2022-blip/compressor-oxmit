@@ -21,7 +21,7 @@ CONFIG_SCHEMA: dict[str, tuple[str, Any, Any, Any, set[Any] | None]] = {
     "max_global_queue_size": ("int", 500, 10, 10000, None),
     "max_concurrent_jobs_per_user": ("int", 3, 1, 50, None),
     "max_concurrent_jobs_vip": ("int", 10, 1, 100, None),
-    "max_file_size_mb": ("int", 2000, 10, 4000, None),
+    "max_file_size_mb": ("int", 3000, 10, 4000, None),
     "active_encoding_workers": ("int", 2, 1, 16, None),
     "active_download_workers": ("int", 4, 1, 20, None),
     "active_upload_workers": ("int", 4, 1, 20, None),
@@ -66,7 +66,7 @@ DEFAULT_SETTINGS: dict[str, dict[str, Any]] = {
         "desc": "سقف اختصاصی صف برای کاربران دارای وضعیت ویژه",
     },
     "max_file_size_mb": {
-        "val": 2000,
+        "val": 3000,
         "type": "int",
         "title": "حداکثر حجم مجاز فایل ورودی (MB)",
         "desc": "حداکثر حجم فایل ویدیویی ارسالی مجاز",

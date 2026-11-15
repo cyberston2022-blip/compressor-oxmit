@@ -697,7 +697,7 @@ class JobEngine(QueueMixin):
         gb = 1024**3
 
         dyn = getattr(self, "dynamic_config", None)
-        max_file_size_mb = dyn.get_int("max_file_size_mb", 2000) if dyn else 2000
+        max_file_size_mb = dyn.get_int("max_file_size_mb", 3000) if dyn else 3000
 
         def _num(override, key):
             try:

@@ -196,7 +196,7 @@ class Settings:
             "normal": {
                 "max_source_gb": _int("NORMAL_MAX_SOURCE_GB", _int("MAX_SOURCE_GB", 4)),
                 "max_duration_min": _int("NORMAL_MAX_DURATION_MIN", 360),
-                "daily_quota_gb": _int("NORMAL_DAILY_QUOTA_GB", 5),
+                "daily_quota_gb": _int("NORMAL_DAILY_QUOTA_GB", 20),
                 "max_active": _int("MAX_ACTIVE_PER_USER", 1),
                 "max_pending": _int("MAX_PENDING_PER_USER", 10),
                 "max_per_hour": _int("MAX_JOBS_PER_HOUR_PER_USER", 10),
