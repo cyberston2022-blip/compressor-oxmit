@@ -251,18 +251,18 @@ async def summary_data(engine, db, cfg, state) -> dict:
           AND completed_at >= now() - interval '24 hours'
         """
     ) or 0
-    bytes_saved_today = await db.fetchval(
+    bytes_saved_today = int(await db.fetchval(
         """
         SELECT COALESCE(SUM(GREATEST(0, source_size - output_size)), 0) FROM jobs
         WHERE status = 'completed'
           AND completed_at >= now() - interval '24 hours'
         """
-    ) or 0
+    ) or 0)
 
     stage_rows = await db.fetch(
         "SELECT stage, count(*) AS cnt FROM jobs WHERE status = 'processing' GROUP BY stage"
     )
-    stage_map = {r["stage"]: r["cnt"] for r in stage_rows}
+    stage_map = {r["stage"]: int(r["cnt"]) for r in stage_rows}
     downloading_cnt = stage_map.get("downloading", 0) + stage_map.get("reserved", 0) + stage_map.get("download_retry", 0)
     encoding_cnt = stage_map.get("encoding", 0) + stage_map.get("validating", 0) + stage_map.get("probing", 0)
     uploading_cnt = stage_map.get("uploading", 0) + stage_map.get("completing", 0) + stage_map.get("archiving", 0) + stage_map.get("upload_retry", 0)
@@ -272,24 +272,24 @@ async def summary_data(engine, db, cfg, state) -> dict:
     ))
     encoding_cnt += other_cnt
 
-    data["active"] = active_cnt
-    data["queued"] = queued_cnt
+    data["active"] = int(active_cnt)
+    data["queued"] = int(queued_cnt)
     data["max_queue"] = max_queue
     data["max_concurrent"] = max_workers
-    data["jobs_today"] = completed_today + failed_today
-    data["users_total"] = await db.fetchval("SELECT count(*) FROM users") or 0
+    data["jobs_today"] = int(completed_today) + int(failed_today)
+    data["users_total"] = int(await db.fetchval("SELECT count(*) FROM users") or 0)
 
-    counters = {r["name"]: r["value"] for r in await db.fetch(
+    counters = {r["name"]: (int(r["value"]) if str(r["value"]).isdigit() else r["value"]) for r in await db.fetch(
         "SELECT name, value FROM counters WHERE name IN "
         "('requests_total','jobs_encoded','jobs_failed','deliveries_ok','deliveries_failed',"
         "'bytes_saved','bytes_in','bytes_out','dedup_exact_reuse','dedup_inflight_joined',"
         "'dedup_similarity_reuse','no_gain_events')")}
 
     # Single Source of Truth for KPIs
-    counters["active"] = active_cnt
-    counters["queued"] = queued_cnt
-    counters["completed"] = completed_today
-    counters["failed"] = failed_today
+    counters["active"] = int(active_cnt)
+    counters["queued"] = int(queued_cnt)
+    counters["completed"] = int(completed_today)
+    counters["failed"] = int(failed_today)
     counters["downloading"] = downloading_cnt
     counters["encoding"] = encoding_cnt
     counters["uploading"] = uploading_cnt
@@ -299,15 +299,16 @@ async def summary_data(engine, db, cfg, state) -> dict:
     counters["max_queue"] = max_queue
     counters["max_concurrent"] = max_workers
     counters["bytes_saved_today"] = bytes_saved_today
-    counters["bytes_saved_today_gb"] = round(bytes_saved_today / (1024**3), 2)
+    counters["bytes_saved_today_gb"] = round(float(bytes_saved_today) / (1024**3), 2)
 
-    avg_dur = await db.fetchval(
+    raw_avg = await db.fetchval(
         """
         SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (completed_at - started_at))), 120.0)
         FROM jobs
         WHERE status = 'completed' AND completed_at > now() - interval '24 hours'
         """
-    ) or 120.0
+    )
+    avg_dur = float(raw_avg or 120.0)
     wait_cycles = math.ceil(queued_cnt / max(1, max_workers))
     est_clear_s = int(wait_cycles * avg_dur)
     from .telemetry_cards import fmt_duration_fa
@@ -519,7 +520,7 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
     one_time_hits: dict[str, deque] = {}   # ip -> deque of GET /panel/one_time times
 
     def _json(data, status: int = 200) -> web.Response:
-        return web.json_response(data, status=status)
+        return web.json_response(data, status=status, dumps=lambda x: json.dumps(x, default=str))
 
     def _ip(request: web.Request) -> str:
         peer = request.transport.get_extra_info("peername") if request.transport else None
@@ -1098,7 +1099,7 @@ def setup(app: web.Application, engine, db, cfg, state) -> None:
                                "events": [{"ts": e["ts"].isoformat(), "actor": e["actor"],
                                            "action": e["action"], "target": e["target"],
                                            "details": e["details"]} for e in events]}
-                    await ws.send_str(json.dumps(payload))
+                    await ws.send_str(json.dumps(payload, default=str))
                 except Exception as loop_err:
                     log.warning("panel ws loop error: %s", loop_err)
                 try:
